@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 360" role="img" aria-labelledby="title desc">
+  <title id="title">A 的右上边与 B 的左下边是同一条公共边</title>
+  <desc id="desc">B 位于 A 的右上方。蓝色公共边的河流状态只保存在 B.hasBottomLeftRiver，A 查询这条边时读取 B 的该字段。</desc>
+  <rect width="680" height="360" fill="#f4f7f5"/>
+  <g stroke="#586460" stroke-width="2" fill="#fff">
+    <polygon points="270,230 230,299.28 150,299.28 110,230 150,160.72 230,160.72"/>
+    <polygon points="390,160.72 350,230 270,230 230,160.72 270,91.44 350,91.44"/>
+  </g>
+  <path d="M230 160.72 L270 230" stroke="#2459a3" stroke-width="7" stroke-linecap="round"/>
+  <path d="M252 198 L405 265" fill="none" stroke="#2459a3" stroke-width="2"/>
+  <g fill="#252c2b" font-family="Microsoft YaHei, sans-serif" text-anchor="middle">
+    <text x="190" y="222" font-size="26">A</text>
+    <text x="190" y="251" font-size="17">(0, 0)</text>
+    <text x="310" y="153" font-size="26">B</text>
+    <text x="310" y="182" font-size="17">(0, 1)</text>
+    <text x="340" y="40" font-size="21">一条公共边，只保存一个河流标记</text>
+  </g>
+  <g fill="#2459a3" font-family="Microsoft YaHei, sans-serif" font-size="18">
+    <text x="405" y="267">A 的右上边</text>
+    <text x="405" y="295">也是 B 的左下边</text>
+    <text x="340" y="336" text-anchor="middle" font-family="Consolas, monospace">B.hasBottomLeftRiver</text>
+  </g>
+</svg>

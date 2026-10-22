@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>09 · 山地与河流 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>09 / 山地与河流</strong><a href="#goal">目标、回顾与场景</a><a href="#elevation">1. 山地丘陵：噪声定种子</a><a href="#cellular">2. 细胞自动机修形</a><a href="#rivers">3. 河流的边存储</a><a href="#spawn">4. 从源头到海：走顶点</a><a href="#constraints">5. 约束与修正</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第 06、08 课<br>含源码走读与推演练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第二阶段 / 地图专题 · 生成专题第三课</div>
+<h1>山地与河流</h1>
+<p class="lead">第八课讲完陆海和气候，地图上已经有了草原、荒漠和冻土，但还没有一座山、一条河。这一课跟两条生成线：MapElevationGenerator 先用一块噪声给陆地“拔高”，再用细胞自动机把散点揉成山脉和丘陵带；RiverGenerator 则在格子与格子的边上“画”河流，从内陆源头一路走到海。读完你应当能区分 Unciv 里“格子属性”和“边属性”两套语义，并解释生成器对山地和河流各自加了什么约束与修正。</p>
+<p class="meta">需要的基础：第六课的河流三布尔边存储与邻居查询，第八课的柏林噪声与温湿字段。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>三个场景都来自游戏里看得见的地方。场景一：同一张图上，山地总是连成一条条链，丘陵围着山转，而不是满图撒胡椒面——这是本课第 2 节细胞自动机的产物。场景二：把新游戏高级设置里的 Map Elevation 滑块（0.6～0.8）拉高，山地和丘陵明显变多——这是第 1 节幂函数的参数。场景三：荒漠里挨着河的格子会变成泛滥平原（Flood plains），游戏内“把这块地变成 River”的文明能力（如俄罗斯的领土扩张、某些伟人）也能凭空画出一条新河——前者靠生成结束后的 convertTerrains，后者靠运行时的 continueRiverOn，两条路径都收在本课。</p>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>山地丘陵：</strong>噪声阈值怎样分出平地/丘陵/山？为什么还需要修形？</li><li><strong>边的语义：</strong>河流为什么存在边上而不是格子里？三个布尔怎样覆盖六条边？</li><li><strong>走线与约束：</strong>一条河怎样从源头走到海？哪些约束防止它画出不像河的东西？</li></ul><p>读完还要会一件事：不看正文，对“地图上某条河是怎么来的、改哪个参数山会变多”这类问题，说出证据在源码的哪一段。</p></div><div><h3>口述上一课的三个结论</h3><ol><li>第八课：山地（OccursInChains）在温湿阶段为什么被整组跳过？（提示：elevationTerrains）</li><li>第六课：A 查它与右上方 B 之间的河、B 查与 A 之间的河，读的是哪个字段？</li><li>第八课：Boreal 类型的湖层为什么把 scale 锁死 5.0？（提示：湖是河流的源头）</li></ol><p>这三条是本课的直接地基。答不上来的先回 <a href="0008-landmass-climate.html">第八课</a>第 5 节、<a href="0006-tilemap.html">第六课</a>河流段扫一眼。</p><p class="source"><a href="reference/hexmath.html">地图与坐标速查</a><a href="0008-landmass-climate.html">第八课：陆海与气候分布</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>山地丘陵的噪声阈值</td><td>12 分钟</td><td>幂函数、两个阈值与 Map Elevation 滑块的关系</td></tr><tr><td>细胞自动机修形</td><td>12 分钟</td><td>rising/lowering 标记的两轮结构与目标数量闸门</td></tr><tr><td>河流的边存储与双向查询</td><td>10 分钟</td><td>三布尔怎样表示六条边；isAdjacentToRiver 的边界处理</td></tr><tr><td>走顶点画河与约束修正</td><td>16 分钟</td><td>RiverCoordinate 的顶点语义、贪心走线、convertTerrains 与 continueRiverOn</td></tr></tbody></table>
+</section>
+
+<section id="elevation"><h2>1. 山地丘陵：噪声定种子</h2>
+<p>第七课的阶段链里，第 3 步是 raiseMountainsAndHills。它属于 MapElevationGenerator——注意这个类名里的 Elevation（海拔）与第八课陆海阶段的 elevation 噪声<strong>不是同一个东西</strong>：陆海阶段的 elevation 决定水陆，算完就丢；这里的“海拔”只作用于已经生成的陆地格，决定它是平地、丘陵还是山。入口前半段：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapElevationGenerator.kt 的构造与三个候选表；①～④ 与右侧对应。</span>
+internal class MapElevationGenerator(
+    private val tileMap: TileMap,
+    private val ruleset: Ruleset,
+    terrains: List&lt;MapGenerator.TerrainOccursRange&gt;,
+    private val randomness: MapGenerationRandomness
+) {
+    <span class="comment">// ① 三个候选表：平地 / 丘陵 / 山地</span>
+    private val flats = terrains.filter {
+        !it.terrain.impassable &amp;&amp; it.terrain.type == TerrainType.Land
+        &amp;&amp; !it.rareFeature &amp;&amp; !it.isRough }
+    private val hills = terrains.filter {
+        (it.terrain.type == TerrainType.Land
+            || it.terrain.type == TerrainType.TerrainFeature)
+        &amp;&amp; it.occursInGroups &amp;&amp; !it.rareFeature }
+    private val mountains = terrains.filter {
+        (it.terrain.type == TerrainType.Land
+            || it.terrain.type == TerrainType.TerrainFeature)
+        &amp;&amp; it.occursInChains &amp;&amp; !it.rareFeature }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt">本地 MapElevationGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt#L15">构造与候选表 · L15</a></p></div><div><p>① terrains 参数是第八课见过的 TerrainOccursRange 列表（MapGenerator 的 terrainConditions）。三个私有表按 unique 分桶：<strong>flats</strong> 是“非不可通行、非崎岖”的平地（草原、平原……）；<strong>hills</strong> 是带 <code>Occurs in groups around high elevations</code> 的地形；<strong>mountains</strong> 是带 <code>Occurs in chains at high elevations</code> 的地形。</p><p>两个 unique 的原文和界面名都对上了：原版规则集里 Hill 是 TerrainFeature、带 “Occurs in groups…”，Mountain 是 Land、带 “Occurs in chains…”（<code>Terrains.json</code> L171 与 L136，Kotlin 侧 <code>Terrain.isHill</code>/<code>isMountain</code> 也是按这两个 unique 判定的）。所以 buckets 不写死 “Hill”/“Mountain” 名字——模组可以自带别的山丘地形，只要挂对应 unique。</p><p>注意 hills/mountains 的过滤条件允许 Land <strong>或</strong> TerrainFeature：山可以是基础地形（原版 Mountain），丘陵可以是特征（原版 Hill，画在草原/平原等基础地形之上）。这个差别在 applyTerrain 里还会用到。</p></div></div>
+<p>主函数先给每个陆地格算一个噪声海拔，过一条幂曲线再切三段：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapElevationGenerator.raiseMountainsAndHills（部分代码）；①～⑥ 与右侧对应。</span>
+fun raiseMountainsAndHills() {
+    if (flats.isEmpty()) return   <span class="comment">// 纯陆地模组兜底</span>
+
+    <span class="comment">// ① 抽本阶段的 z 层（噪声种子）</span>
+    val elevationSeed = randomness.RNG.nextInt().toDouble()
+
+    <span class="comment">// ② 地图类型偏移：boreal 更多山</span>
+    val mapSpecificElevationOffset = when (tileMap.mapParameters.type) {
+        MapType.boreal -&gt; +0.03
+        else -&gt; 0.0
+    }
+    <span class="comment">// ③ 幂指数：滑块越大指数越小</span>
+    val exponent = 1.0 - tileMap.mapParameters.elevationExponent.toDouble()
+        - mapSpecificElevationOffset
+    fun Double.powSigned(exponent: Double) =
+        abs(this).pow(exponent) * sign(this)
+
+    tileMap.setTransients(ruleset)
+
+    for (tile in tileMap.values) {
+        if (tile.isWater) continue
+        <span class="comment">// ④ 每格：小尺度噪声 → 保号幂</span>
+        val elevation = randomness.getPerlinNoise(
+            tile, elevationSeed, scale = 2.0).powSigned(exponent)
+        <span class="comment">// ⑤ 三段阈值：&gt;0.7 山 / &gt;0.5 丘陵 / 否则平地</span>
+        if (elevation &gt; 0.7 &amp;&amp; mountains.isNotEmpty())
+            applyTerrain(tile, mountains)
+        else if (elevation &gt; 0.5 &amp;&amp; hills.isNotEmpty())
+            applyTerrain(tile, hills)
+        else
+            applyTerrain(tile, flats)
+    }
+
+    <span class="comment">// ⑥ 修形（第 2 节）+ 全图刷新缓存</span>
+    cellularMountainRanges()
+    cellularHills()
+    for (tile in tileMap.values) tile.setTerrainTransients()
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt">本地 MapElevationGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt#L33">raiseMountainsAndHills · L33</a></p></div><div><p>① 与第八课各阶段同款：从 RNG 抽一个整数切 z 层，循环体内不再动 RNG。</p><p>② 只有 boreal（北方冻土）加 0.03 偏移——偏移从指数里扣，山更多（下一段代入计算）。</p><p>③ <code>elevationExponent</code> 就在新游戏高级设置的 <strong>Map Elevation 滑块</strong>（MapParametersTable L484，范围 0.6～0.8，默认 0.7）。指数 = 1 − 滑块值：滑块越大，指数越小。</p><p>④ 噪声 scale 写死 2.0——比陆海阶段的默认 30 小得多。scale 是“多少格走完一个起伏周期”（第八课第 3 节），2 意味着<strong>海拔几乎每两三格就换一个值</strong>：这正是不希望山连片的“种子”分布，成链交给第 2 节的修形。</p><p>⑤ 为什么④算出的噪声不能直接当 elevation、中间要过一道 powSigned？两个原因。第一，<strong>量程对不上</strong>：噪声输出集中在 ±0.55 附近，而阈值写死 0.7/0.5——不过幂直接比，一座山都切不出来（0.55 &gt; 0.7 永远为假）。第二，<strong>滑块要能调“山的多与少”</strong>。powSigned 是保号幂（先取绝对值做幂、再乘回正负号），指数 0.3 小于 1，对 0 到 1 之间的数是<strong>抬升</strong>：0.05<sup>0.3</sup> ≈ 0.41、0.3<sup>0.3</sup> ≈ 0.70、0.55<sup>0.3</sup> ≈ 0.84。抬升不是均匀的——越小的数被抬得越狠（0.05 抬了 8 倍，0.55 只抬了 1.5 倍），整体把“少数原本较高的格”推进阈值线内。指数正是滑块控制的旋钮：指数变小（滑块拉大），抬升更猛，更多格子过线成山。如果你来设计“滑块直接当阈值”的方案（滑块 0.8 就用 0.8 当线），量程问题无解——噪声最大才 0.55，阈值 0.6～0.8 段永远切不出任何山，滑块只在 0.5 以下才有效果，界面却得展示一个“看起来没用”的 0.6～0.8 区间。过一道幂，阈值不动、动的是值的分布，滑块全程有效。</p><p>⑥ 两个修形函数在下一节；结束后全图 setTerrainTransients 刷新 isMountain 一类缓存。</p></div></div>
+<p>把“幂后阈值”换算回“幂前噪声值”更直观：幂后 &gt; 0.7 等价于幂前 n &gt; 0.7<sup>1/0.3</sup> ≈ 0.30。为什么指数是 <strong>1/0.3 而不是 0.3</strong>？因为这是<strong>反解</strong>：源码方向是“幂前 → 幂后”（n<sup>0.3</sup> &gt; 0.7），我们想知道“幂前多大才过线”，就要把 0.7 开 0.3 次方——幂和开方互为逆运算，n<sup>0.3</sup> &gt; 0.7 两边同时取 1/0.3 次幂（即开 0.3 次方）得 n &gt; 0.7<sup>1/0.3</sup>。1/0.3 ≈ 3.33 就是那个“为什么有个 1/3”的来历——1 除以指数 0.3，不是凭空出现的常数。不同滑块位置的换算（0.7<sup>1/指数</sup> 与 0.5<sup>1/指数</sup>，即山与丘陵的<strong>幂前门槛</strong>；数值越小越容易成山）：</p>
+<table><thead><tr><th scope="col">Map Elevation 滑块</th><th scope="col">指数 1−滑块−偏移</th><th scope="col">山的幂前门槛</th><th scope="col">丘陵的幂前门槛</th></tr></thead><tbody>
+<tr><td>0.6（少山）</td><td>0.4</td><td>0.7<sup>1/0.4</sup> ≈ 0.41</td><td>0.5<sup>1/0.4</sup> ≈ 0.18</td></tr>
+<tr><td>0.7（默认）</td><td>0.3</td><td>0.7<sup>1/0.3</sup> ≈ 0.30</td><td>0.5<sup>1/0.3</sup> ≈ 0.099</td></tr>
+<tr><td>0.8（多山）</td><td>0.2</td><td>0.7<sup>1/0.2</sup> ≈ 0.17</td><td>0.5<sup>1/0.2</sup> ≈ 0.031</td></tr>
+<tr><td>0.7 + boreal(+0.03)</td><td>0.27</td><td>0.7<sup>1/0.27</sup> ≈ 0.27</td><td>0.5<sup>1/0.27</sup> ≈ 0.077</td></tr>
+</tbody></table>
+<p>这张表的读法：<strong>第一列</strong>是玩家在界面拉到的滑块位置（含 boreal 的隐式偏移对照）；<strong>第二列</strong>是源码里真正用的幂指数（1 减滑块再减类型偏移）；<strong>第三、四列</strong>是“幂后阈值 0.7 / 0.5 换算回幂前噪声值”——幂是抬升（指数 &lt; 1），反过来求幂前门槛就是开方，所以指数跑到了分母。代入验证读法：默认滑块下，幂前 0.3 的格子在表里查门槛恰是 0.30，幂后 0.3<sup>0.3</sup> ≈ 0.70，压着山的门槛过线。看第三列的走向：滑块从 0.6 拉到 0.8，山的门槛从 0.41 降到 0.17——<strong>门槛越低，越多格子过线成山</strong>，这就是“拉高滑块山变多”的全部数学。boreal 的 +0.03 效果同向但幅度小。</p>
+<div class="paired"><div><pre><code><span class="comment">// MapElevationGenerator.applyTerrain（完整）；①～④ 与右侧对应。</span>
+private fun applyTerrain(tile: Tile,
+        terrains: List&lt;MapGenerator.TerrainOccursRange&gt;) {
+    <span class="comment">// ① 组内先按温湿过滤，全不匹配再整组随机</span>
+    val desiredTerrain = (terrains
+        .filter { it.matchesTempAndTerrain(tile) }
+        .ifEmpty { terrains }).random(randomness.RNG)
+
+    <span class="comment">// ② 先摘掉现有的山丘类特征</span>
+    tile.dropElevatedFeatures()
+
+    if (desiredTerrain.terrain.type == TerrainType.Land) {
+        <span class="comment">// ③ Land：直接写基础地形名</span>
+        tile.baseTerrain = desiredTerrain.name
+    } else {
+        <span class="comment">// ④ TerrainFeature：选一个能承载它的平地再叠特征</span>
+        val baseTerrains = flats.filter {
+            desiredTerrain.terrain.occursOn.contains(it.name)
+            &amp;&amp; it.matchesHumidityAndTemp(tile) }
+            .ifEmpty { flats.filter {
+                desiredTerrain.terrain.occursOn.contains(it.name) } }
+        if (baseTerrains.isEmpty()) return
+        val baseTerrain = baseTerrains.random(randomness.RNG)
+        tile.baseTerrain = baseTerrain.name
+        tile.addTerrainFeature(desiredTerrain.name)
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt">本地 MapElevationGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt#L207">applyTerrain · L207</a></p></div><div><p>① 候选表里可能不止一个地形（模组可有多种草原），先按第八课的温湿矩形过滤，全不匹配时整组随机兜底——和温湿阶段选地形同一套判定，只是换了一张更小的表。</p><p>② dropElevatedFeatures 把格子上已有的山/丘特征摘掉（比如修形阶段反复改判时），保证不叠两层。</p><p>③ 山地类若 type 是 Land（原版 Mountain）：直接写 baseTerrain。</p><p>④ 若是 TerrainFeature（原版 Hill）：先从 flats 里挑一个 occursOn 允许、温湿匹配的基础地形写进去，再把特征叠上。所以“Hill”格的 baseTerrain 仍是 Grassland/Plains 等，丘陵只是特征——第六课的地层模型在这里兑现。<strong>这是本课少数每格直接动 RNG 的地方</strong>（random 两次），和第八课温湿阶段的 randomOrNull 同一性质。</p></div></div>
+</section>
+
+<section id="cellular"><h2>2. 细胞自动机修形</h2>
+<p>阈值切出来的山地是噪声形状——原版 scale=2 的噪声切完，山是一小撮一小撮的孤立斑点。但玩家期待的“山脉”是连绵的链。MapElevationGenerator 用两轮细胞自动机（cellular automata）修形：<strong>每轮先扫描全图给格子挂临时标记，再统一兑现标记</strong>，循环 5 次。先看山地的版本：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapElevationGenerator.cellularMountainRanges（部分代码）；①～⑤ 与右侧对应。</span>
+private fun cellularMountainRanges() {
+    if (mountains.isEmpty()) return
+
+    <span class="comment">// ① 目标：现有山数 × 2</span>
+    val targetMountains =
+        tileMap.values.count { it.isMountainTerrain() } * 2
+    val impassableTerrains = ruleset.terrains.values
+        .filter { it.impassable }.map { it.name }.toSet()
+
+    for (i in 1..5) {
+        var totalMountains =
+            tileMap.values.count { it.isMountainTerrain() } * 2
+
+        for (tile in tileMap.values) {
+            if (tile.isWater) continue
+            <span class="comment">// ② 数邻居：几个山、几个不可通行</span>
+            val isMountain = tile.isMountainTerrain()
+            val adjacentMountains =
+                tile.neighbors.count { it.isMountainTerrain() }
+            val adjacentImpassible =
+                tile.neighbors.count { it.baseTerrain in impassableTerrains }
+
+            <span class="comment">// ③ 四条标记规则</span>
+            if (adjacentMountains == 0) {
+                if (isMountain &amp;&amp; randomness.RNG.nextInt(until = 4) == 0)
+                    tile.addTerrainFeature(lowering)   <span class="comment">// 孤山：1/4 概率降</span>
+            } else if (adjacentMountains == 1) {
+                if (!isMountain &amp;&amp; randomness.RNG.nextInt(until = 10) == 0)
+                    tile.addTerrainFeature(rising)     <span class="comment">// 单邻山：1/10 概率升</span>
+            } else if (adjacentImpassible == 3) {
+                if (isMountain &amp;&amp; randomness.RNG.nextInt(until = 2) == 0)
+                    tile.addTerrainFeature(lowering)   <span class="comment">// 邻 3 不可通行：1/2 概率降</span>
+            } else if (isMountain &amp;&amp; adjacentImpassible &gt; 3) {
+                tile.addTerrainFeature(lowering)       <span class="comment">// 邻 &gt;3：必降</span>
+            }
+        }
+
+        <span class="comment">// ④ 统一兑现：rising 升山、lowering 降回平地</span>
+        for (tile in tileMap.values) {
+            if (tile.isWater) continue
+            if (tile.terrainFeatures.contains(rising)) {
+                tile.removeTerrainFeature(rising)
+                if (totalMountains &gt;= targetMountains) continue
+                totalMountains++
+                applyTerrain(tile, mountains)
+            }
+            if (tile.terrainFeatures.contains(lowering)) {
+                tile.removeTerrainFeature(lowering)
+                if (totalMountains * 2 &lt;= targetMountains) continue
+                totalMountains--
+                applyTerrain(tile, flats)
+            }
+        }
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt">本地 MapElevationGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt#L71">cellularMountainRanges · L71</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt#L21">rising/lowering 常量 · L21</a></p></div><div><p>① 目标数量 = 当前山数 × 2。山变密的主要推动力就是这个翻倍目标。</p><p>② 每格数两类邻居：adjacentMountains（含特征判定，isMountainTerrain 同时看 baseTerrain 和 terrainFeatures 里有没有 OccursInChains 的地形）和 adjacentImpassible（以<strong>基础地形是否不可通行</strong>计数，山本身不可通行，但这一计数也涵盖其他不可通行地形）。</p><p>③ 四条挂标记规则，语义是“链长什么样”：孤山（0 个山邻）倾向拆掉；贴着一个山的平地倾向长上去（链的延伸）；周围不可通行太多（3 个减半、超过 3 必降）倾向拆掉——这是<strong>防止大片不可通行地形堵死通路</strong>的约束，山链可以有，但不能把大陆切成不连通的几块。</p><p>④ 兑现有闸门：rising 只有在 totalMountains 还没到目标时才真升；lowering 只有在数量明显超目标（×2 还 ≤ 目标，即总数仍低于目标一半以上）才跳过降级——总效果是山数向“初始 × 2”靠拢。注意 <code>~Raising~</code>/<code>~Lowering~</code> 是带波浪号的假地形名，只活在内存里，兑现段第一件事就是摘掉它们，绝不会写进存档。</p><p>⑤ 外层循环 5 轮：每轮挂标记→兑现，链一格格延伸（单邻山规则每轮最多让链端长一格）。</p></div></div>
+<p>cellularHills 是同一结构的变体，只列差异：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapElevationGenerator.cellularHills 的标记规则（省略循环与兑现骨架）；①～③ 与右侧对应。</span>
+if (adjacentHills &lt;= 1 &amp;&amp; adjacentMountains == 0 &amp;&amp; isHill
+    &amp;&amp; randomness.RNG.nextInt(until = 2) == 0)
+    tile.addTerrainFeature(lowering)   <span class="comment">// ① 孤丘：1/2 拆</span>
+else if (adjacentHills &gt; 3 &amp;&amp; adjacentMountains == 0 &amp;&amp; isHill
+    &amp;&amp; randomness.RNG.nextInt(until = 2) == 0)
+    tile.addTerrainFeature(lowering)   <span class="comment">// ② 密丘：1/2 拆</span>
+else if (adjacentHills + adjacentMountains in 2..3 &amp;&amp; !isHill
+    &amp;&amp; randomness.RNG.nextInt(until = 2) == 0)
+    tile.addTerrainFeature(rising)     <span class="comment">// ③ 山边或丘群边：1/2 升</span>
+
+<span class="comment">// 兑现段的两个特殊闸门（与山地版的差异）：</span>
+<span class="comment">// rising：if (totalHills &gt; targetHills &amp;&amp; i != 1) continue</span>
+<span class="comment">// lowering：if (totalHills &gt;= targetHills * 0.9f || i == 1) { 降级 }</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt">本地 MapElevationGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt#L119">cellularHills · L119</a></p></div><div><p>① 丘陵要的是<strong>群但不密</strong>：孤丘（≤1 个丘邻且无山邻）拆——丘陵应该围着山，不该单独冒头。</p><p>② 太密（&gt;3 个丘邻）也拆——丘陵带要有呼吸感。</p><p>③ 长丘的主力规则：邻居中山+丘合计 2～3 个的平地，一半概率升丘。注意判定写的是 <code>tile.hasTerrain(mountains)</code> 排除山格（山不参与升降），数的是山邻+丘邻——<strong>丘长在山链外围</strong>，正是“Occurs in groups around high elevations”的字面意思。</p><p>闸门差异：丘陵目标不翻倍（targetHills 就是现状），所以第一轮（i == 1）几乎放开手脚重排，后四轮在 90%～100% 之间微调；rising 的闸门还允许第一轮超目标。山地先跑、丘陵后跑——丘陵看到的“山邻”已经是修完形的山链。</p></div></div>
+<aside class="callout"><strong>Godot 对照：把“修形”和“生成”分开</strong><p>两段式结构（噪声定种子 → 细胞自动机修形）是可迁移的思路：噪声负责“哪里大概有山”，自动机负责“山的形状像山”。Godot 里你可以用 FastNoiseLite 出一张海拔图，再用相同两轮扫描的 GDScript/C# 修形——Godot 没有内置细胞自动机，但“挂标记→统一兑现→循环 N 次”本身就是十几行代码。分开的好处是调参时能独立看效果：scale 只影响种子分布，概率规则只影响链的形状。Godot 4.x 均适用。</p></aside>
+</section>
+
+<section id="rivers"><h2>3. 河流的边存储</h2>
+<p>第六课讲 Tile 分层时埋下了伏笔：河流不是格子属性，是<strong>边属性</strong>。现在把这笔账算清。每个六边形有六条边，Tile 却只存三个布尔：</p>
+<div class="paired"><div><pre><code><span class="comment">// Tile.kt 的三个河流字段（序列化字段，第六课的分层表里见过）：</span>
+var hasBottomRightRiver = false
+var hasBottomRiver = false
+var hasBottomLeftRiver = false
+
+<span class="comment">// Tile.isConnectedByRiver：第六课走读过的双向查询；①② 与右侧对应。</span>
+fun isConnectedByRiver(otherTile: Tile): Boolean {
+    if (otherTile == this)
+        throw Exception("Should not be called to compare to self!")
+    return when (tileMap.getNeighborTileClockPosition(this, otherTile)) {
+        2 -&gt; otherTile.hasBottomLeftRiver   <span class="comment">// 我们在它左下</span>
+        4 -&gt; hasBottomRightRiver            <span class="comment">// 我们在它左上</span>
+        6 -&gt; hasBottomRiver                 <span class="comment">// 我们在它正上</span>
+        8 -&gt; hasBottomLeftRiver             <span class="comment">// 我们在它右上</span>
+        10 -&gt; otherTile.hasBottomRightRiver <span class="comment">// 我们在它右下</span>
+        12 -&gt; otherTile.hasBottomRiver      <span class="comment">// 我们在它正下</span>
+        else -&gt; throw Exception("非邻居不该调用！")
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L89">三布尔字段 · L89</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L699">isConnectedByRiver · L699</a></p></div><div><p>① 三个布尔只描述格子<strong>下半圈</strong>的三条边：左下、正下、右下。上半圈三条边不归自己管——它们分别是左上、右上邻居的“正下”边和右下邻居的“左下”边（环绕地图用第六课讲过的 getNeighborTileClockPosition 补偿，查询方读到的仍是同一个布尔）。</p><p>② when 的六个分支就是这张对应表：B 在 A 右上（2 点钟）时，无论 A 查 B 还是 B 查 A，读的都是 <code>B.hasBottomLeftRiver</code>——第六课已经用宽 6 的小图在 REPL 里验证过。非邻居进来直接抛异常，宁可崩溃也不给错误答案。</p><p>这套设计的收益：每条边只有<strong>一个</strong>归属者，序列化不会出现两个格子对同一条边各存一份、还可能互相矛盾的副本；代价是任何“这条边上有河吗”的查询都要先算清楚“问的是谁的哪条边”。</p></div></div>
+<p>玩家侧最常用的聚合查询是 isAdjacentToRiver——战斗减益、农田淡水、泛滥平原判定全都走它：</p>
+<div class="paired"><div><pre><code><span class="comment">// Tile.isAdjacentToRiver（含缓存）与 setConnectedByRiver；①～④ 与右侧对应。</span>
+@Transient @Cache
+private var isAdjacentToRiver = false
+@Transient @Cache
+private var isAdjacentToRiverKnown = false
+
+fun isAdjacentToRiver(): Boolean {
+    if (!isAdjacentToRiverKnown) {
+        <span class="comment">// ① 自有三边任一有河，或任一邻居与我之间有河</span>
+        isAdjacentToRiver =
+            hasBottomLeftRiver || hasBottomRiver || hasBottomRightRiver
+            || neighbors.any { isConnectedByRiver(it) }
+        isAdjacentToRiverKnown = true
+    }
+    return isAdjacentToRiver
+}
+
+<span class="comment">// ② 写入口：所有六方向的河都从这一个函数落笔</span>
+fun setConnectedByRiver(otherTile: Tile, newValue: Boolean,
+        convertTerrains: Boolean = false): Boolean {
+    val field = when (tileMap.getNeighborTileClockPosition(this, otherTile)) {
+        2 -&gt; otherTile::hasBottomLeftRiver
+        4 -&gt; ::hasBottomRightRiver
+        6 -&gt; ::hasBottomRiver
+        8 -&gt; ::hasBottomLeftRiver
+        10 -&gt; otherTile::hasBottomRightRiver
+        12 -&gt; otherTile::hasBottomRiver
+        else -&gt; return false
+    }
+    if (field.get() == newValue) return false   <span class="comment">// ③ 无变化直接失败</span>
+    field.set(newValue)
+    <span class="comment">// ④ 失效两侧缓存 + 可选地形转换</span>
+    val affectedTiles = listOf(this, otherTile)
+    for (tile in affectedTiles)
+        tile.resetAdjacentToRiverTransient(newValue)
+    if (convertTerrains)
+        MapGenerator.Helpers.convertTerrains(ruleset, affectedTiles)
+    return true
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L715">isAdjacentToRiver · L715</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L1237">setConnectedByRiver · L1237</a></p></div><div><p>① 定义是“格子的六条边里至少一条有河”。前三项查自己的三布尔——源码注释特意说明：地图最底边没有下方邻居时，格子自己的三布尔仍算数，贴边画河不会查无此河。后半句 any 遍历邻居，用 isConnectedByRiver 查上半圈。</p><p>② 写入与查询同一张 when 表（返回的是属性的 KMutableProperty 引用，直接 get/set）。编辑器画河、生成器画河、自然奇观拆河（NaturalWonderGenerator 把未来 Coast 上的河清掉）最终都走这里。</p><p>③ 状态没变返回 false——调用方靠返回值区分“真画了一条”和“本来就有”。</p><p>④ 画/拆河后只有<strong>两侧</strong>格子的 isAdjacentToRiver 缓存需要处理：新增河时可以直接置真（新边必然让两侧都临河），删除时干脆作废缓存下次重算（resetAdjacentToRiverTransient 的注释解释了这个不对称）。convertTerrains 参数连到第 5 节的泛滥平原转换。</p></div></div>
+<p>规则集里还有一个<strong>虚拟 River 地形</strong>，把“临河”包装成第三课的 unique 系统认识的地形：Terrains.json 里 name 为 “River” 的条目 type 是 TerrainFeature、gold=1、带 “Doesn't generate naturally”——它从不出现在任何格子上，只作为产出与条件的挂载点（<code>Must be on [River]</code>、<code>[+1 Production] from [River] tiles</code> 都按 isAdjacentToRiver 判定，TileStatFunctions L91 走 riverTerrain 查产出）。json 注释原文：“Rivers exist on tile edges, not as terrain feature per se.”——边存储 + 虚拟地形，是同一设计的两面。</p>
+</section>
+
+<section id="spawn"><h2>4. 从源头到海：走顶点</h2>
+<p>RiverGenerator 的类注释开门见山：地图生成<strong>沿六边形的顶点（vertex）走</strong>，游戏内加河沿<strong>边</strong>操作——两条路径，本节先讲前者。入口先定“要画几条、从哪画”：</p>
+<div class="paired"><div><pre><code><span class="comment">// RiverGenerator.spawnRivers（部分代码）；①～⑤ 与右侧对应。</span>
+fun spawnRivers(resultingTiles: MutableSet&lt;Tile&gt;? = null) {
+    if (tileMap.values.none { it.isWater }) return   <span class="comment">// ① 纯陆地图不画河</span>
+    <span class="comment">// ② 河数 = 陆地格数 × 系数（默认 0.01，四舍五入）</span>
+    val numberOfRivers = (tileMap.values.count { it.isLand }
+        * riverCountMultiplier).roundToInt()
+
+    <span class="comment">// ③ 源头候选：优先远离水的山</span>
+    var optionalTiles = tileMap.values.asSequence()
+        .filter { it.getBaseTerrain().isMountain &amp;&amp; it.isFarEnoughFromWater() }
+        .toMutableList()
+    if (optionalTiles.size &lt; numberOfRivers)
+        optionalTiles.addAll(tileMap.values
+            .filter { it.isHill() &amp;&amp; it.isFarEnoughFromWater() })
+    if (optionalTiles.size &lt; numberOfRivers)
+        optionalTiles = tileMap.values
+            .filter { it.isLand &amp;&amp; it.isFarEnoughFromWater() }.toMutableList()
+
+    <span class="comment">// ④ 分散选点（第八课资源分布同款）</span>
+    val mapRadius = tileMap.mapParameters.mapSize.radius
+    val riverStarts = randomness.chooseSpreadOutLocations(
+        numberOfRivers, optionalTiles, mapRadius)
+    <span class="comment">// ⑤ 逐条画</span>
+    for (tile in riverStarts) spawnRiver(tile, resultingTiles)
+}
+
+<span class="comment">// isFarEnoughFromWater：距离 1..minRiverLength-1 内无水（默认 5 → 查 1..4 环）</span>
+private fun Tile.isFarEnoughFromWater(): Boolean {
+    for (distance in 1 until minRiverLength) {
+        if (getTilesAtDistance(distance).any { it.isWater }) return false
+    }
+    return true
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt">本地 RiverGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt#L30">spawnRivers · L30</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ModConstants.kt#L93">riverCountMultiplier 等 · ModConstants L93</a></p></div><div><p>① 全陆地直接返回——河要有地方入海。</p><p>② 河的数量来自规则集 ModConstants（原版默认 0.01）：<strong>每 100 个陆地格约 1 条河</strong>。Kotlin REPL 实测一张 Small 六边图（705 格、510 陆地）→ 5 条河，与 round(510×0.01) 吻合。</p><p>③ 源头候选三级降级：山（getBaseTerrain().isMountain，即基础地形带 OccursInChains）→ 丘陵 → 任意陆地，每级都要求 isFarEnoughFromWater。minRiverLength 默认 5：<strong>源头周围 4 环内不得有水</strong>——太近的“河”两三格就入海，看起来像小水洼。第八课 Boreal 锁湖层 scale 时说“湖是河流的源头”，指的就是这套候选：boreal 图湖多，三级候选常常到不了第二级。</p><p>④ chooseSpreadOutLocations 是第七/八课资源放置用过的同一个“均匀撒点”函数（初始间距按数量和半径算，放不下再逐步降距离）。河流源头也复用它——源头挤在一起会画出一堆平行短河。</p><p>⑤ resultingTiles 只在地图编辑器单步重算时传入（记录受影响格子，供 convertTerrains 只转换这些格子），正常生成传 null。</p></div></div>
+<p>画一条河时，真正的坐标单位不是格子，是<strong>顶点</strong>。先弄清 RiverCoordinate 的定义，再看走线循环：</p>
+<div class="paired"><div><pre><code><span class="comment">// RiverGenerator.RiverCoordinate（骨架）；①～③ 与右侧对应。</span>
+<span class="comment">// 源码注释：建议先在纸上画几个六边形再看这段，超级有用！</span>
+class RiverCoordinate(
+    private val tileMap: TileMap,
+    private val position: HexCoord,
+    private val bottomRightOrLeft: BottomRightOrLeft
+) {
+    enum class BottomRightOrLeft {
+        BottomLeft,    <span class="comment">// 该格 7 点钟方向的顶点</span>
+        BottomRight    <span class="comment">// 该格 5 点钟方向的顶点</span>
+    }
+    <span class="comment">// ① 用"锚定格 + 5/7 点钟"定位一个顶点</span>
+    private val myTile = tileMap[position]
+    private val myTopLeft = tileMap.getIfTileExistsOrNull(x + 1, y)
+    private val myBottomLeft = tileMap.getIfTileExistsOrNull(x, y - 1)
+    private val myTopRight = tileMap.getIfTileExistsOrNull(x, y + 1)
+    private val myBottomRight = tileMap.getIfTileExistsOrNull(x - 1, y)
+    private val myBottomCenter = tileMap.getIfTileExistsOrNull(x - 1, y - 1)
+
+    <span class="comment">// ② 相邻的三个顶点：左右的必然相邻</span>
+    fun getAdjacentPositions(): Sequence&lt;RiverCoordinate&gt; = sequence {
+        if (bottomRightOrLeft == BottomLeft) {
+            yield(RiverCoordinate(tileMap, position, BottomRight))  <span class="comment">// 同格另一侧</span>
+            if (myTopLeft != null)
+                yield(RiverCoordinate(tileMap, myTopLeft.position, BottomRight))
+            if (myBottomLeft != null)
+                yield(RiverCoordinate(tileMap, myBottomLeft.position, BottomRight))
+        } else { /* BottomRight 的镜像，三个候选同理 */ }
+    }
+
+    <span class="comment">// ③ 该顶点 touches 的三个格子</span>
+    fun getAdjacentTiles(): Sequence&lt;Tile&gt; = sequence {
+        yield(myTile)
+        myBottomCenter?.let { yield(it) }
+        if (bottomRightOrLeft == BottomLeft) myBottomLeft?.let { yield(it) }
+        else myBottomRight?.let { yield(it) }
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt">本地 RiverGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt#L101">RiverCoordinate · L101</a></p></div><div><p>① 一个顶点由“哪个格子 + 5 点钟还是 7 点钟”唯一定位。平顶六边形的每个顶点恰好挨着三个格子（源码注释：总是取“最北”的格子做锚，配 5/7 两个方向之一，保证同一顶点只有一种写法）。锚定格的五个邻居引用在构造时一次取齐。</p><p>② 顶点的邻居是顶点：7 点钟顶点的三个相邻顶点 = 同格的 5 点钟 + 左上格的 5 点钟 + 左下格的 5 点钟——源码注释点破规律：“左右顶点互为邻居”，rights 只挨 lefts，反之亦然，写错立刻能看出来。</p><p>③ 每个顶点 touches 三个格子：锚定格、正下格、再加上左下或右下（按 5/7 点钟）。<strong>河流走顶点的意义在这里</strong>：从顶点 A 移到相邻顶点 B，跨过的是 A、B 共有的两个格子之间那条边——下一节 paintTo 就把这条边涂上。</p></div></div>
+<p>走线循环本体——每步在三个相邻顶点里挑“离海最近”的：</p>
+<div class="paired"><div><pre><code><span class="comment">// RiverGenerator.spawnRiver（部分代码）；①～⑤ 与右侧对应。</span>
+fun spawnRiver(initialPosition: Tile, endPosition: Tile,
+        resultingTiles: MutableSet&lt;Tile&gt;?) {
+    <span class="comment">// ① 起点：源头格的两个底角随机选一个</span>
+    var riverCoordinate = RiverCoordinate(tileMap,
+        initialPosition.position,
+        RiverCoordinate.BottomRightOrLeft.entries.random(randomness.RNG))
+
+    repeat(maxRiverLength) {
+        <span class="comment">// ② 顶点若已 touches 水 → 到站，停</span>
+        if (riverCoordinate.getAdjacentTiles().any { it.isWater }) return
+
+        val possibleCoordinates = riverCoordinate.getAdjacentPositions()
+        if (possibleCoordinates.none()) return   <span class="comment">// ③ 走到地图边界的死角</span>
+
+        <span class="comment">// ④ 贪心：按"三格中最小距海距离"分组，取最小的一组随机挑</span>
+        val newCoordinate = possibleCoordinates
+            .groupBy { newCoordinate -&gt;
+                newCoordinate.getAdjacentTiles()
+                    .map { it.aerialDistanceTo(endPosition) }
+                    .minOrNull()!! }
+            .minByOrNull { it.key }!!
+            .component2().random(randomness.RNG)
+
+        <span class="comment">// ⑤ 涂边 + 前进</span>
+        riverCoordinate.paintTo(newCoordinate, resultingTiles)
+        riverCoordinate = newCoordinate
+    }
+    debug("River reached max length!")   <span class="comment">// 兜底：666 步还没入海</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt">本地 RiverGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt#L73">spawnRiver · L73</a></p></div><div><p>① 起点定在源头的 5 点钟或 7 点钟顶点（随机），从此走顶点网格。</p><p>② 停止条件看顶点不看点：顶点 touches 的三格中任一为水即入海。终点在 spawnRivers 里先由 getClosestWaterTile 挑好（从 1 环到 maxRiverLength 环逐环找最近的水，找不到才报错）。</p><p>③ 环绕地图走 getIfTileExistsOrNull，正常有补偿；非环绕图边界处三个候选可能全 null——河到地图边缘戛然而止，这是允许的。</p><p>④ 选择策略是<strong>带随机的贪心</strong>：每个候选顶点算“它 touches 的三格里离海最近的距离”（aerialDistanceTo 是第六课的环绕感知距离），按这个最小距离分组，取距离最小的组、组内随机。所以河整体奔海而去，但每步在三选一里有随机性——这就是河道的蜿蜒。</p><p>⑤ paintTo 涂掉本步跨过的那条边，然后顶点前进。maxRiverLength 默认 666（ModConstants 注释提醒：别设得比最大地图半径小），防极少数情况原地绕圈。</p></div></div>
+<p>paintTo 把“顶点移动”翻译回“涂哪条边”，是两种坐标系的桥：</p>
+<div class="paired"><div><pre><code><span class="comment">// RiverCoordinate.paintTo 与三个 paint 私有函数；①～④ 与右侧对应。</span>
+fun paintTo(newCoordinate: RiverCoordinate,
+        resultingTiles: MutableSet&lt;Tile&gt;?) {
+    if (newCoordinate.position == position)
+        <span class="comment">// ① 同格换侧 → 涂自己正下边</span>
+        paintBottom(resultingTiles)
+    else if (bottomRightOrLeft == BottomRight) {
+        if (newCoordinate.getAdjacentTiles().contains(myTile))
+            paintBottomRight(resultingTiles)   <span class="comment">// ② 5→4 点钟方向</span>
+        else
+            newCoordinate.paintBottomLeft(resultingTiles)  <span class="comment">// ③ 5 点钟直下：涂左下格的左下边</span>
+    } else {
+        if (newCoordinate.getAdjacentTiles().contains(myTile))
+            paintBottomLeft(resultingTiles)    <span class="comment">// ②' 7→8 点钟方向</span>
+        else
+            newCoordinate.paintBottomRight(resultingTiles) <span class="comment">// ③' 7 点钟直下</span>
+    }
+}
+
+private fun paintBottom(resultingTiles: MutableSet&lt;Tile&gt;?) {
+    myTile.hasBottomRiver = true          <span class="comment">// ④ 落笔都在这三个函数</span>
+    if (resultingTiles == null) return
+    resultingTiles.add(myTile)
+    myBottomCenter?.let { resultingTiles.add(it) }
+}
+<span class="comment">// paintBottomLeft / paintBottomRight 同构：</span>
+<span class="comment">// 分别置 myTile.hasBottomLeftRiver / hasBottomRightRiver</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt">本地 RiverGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt#L154">paintTo · L154</a></p></div><div><p>① 从 7 点钟顶点走到同格 5 点钟顶点（或反向），跨过的是锚定格自己的正下边——直接置 hasBottomRiver。</p><p>② 从 5 点钟顶点走向“同 touches 我的格子”的相邻顶点（即向 4 点钟方向平移），跨过我的右下边。</p><p>③ 从 5 点钟顶点向下走到<strong>另一格</strong>锚定的顶点：这条边其实是新顶点锚定格（我右下方那位）的左下边，所以让 newCoordinate 自己去 paintBottomLeft——落笔永远写“边的归属格”自己的三布尔之一，跟第 3 节的归属规则严丝合缝。7 点钟一侧完全镜像。</p><p>④ 三个 paint 函数各只置一个布尔，顺手把受影响格子塞进 resultingTiles（编辑器用）。生成路径画完一条河，就是一串这样的布尔落在沿途格子上。</p></div></div>
+</section>
+
+<section id="constraints"><h2>5. 约束与修正</h2>
+<p>前面各段散落的“为什么不像坏河/坏山”的规则在这里收拢。先看生成器画完河之后的一步：convertTerrains。阶段链里 RiverGenerator 之后紧跟 <code>convertTerrains(map.values)</code>（MapGenerator L202），它把规则集里 “Becomes X when adjacent to Y” 类 unique 兑现：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerator.Helpers.convertTerrains（完整）；①～④ 与右侧对应。</span>
+fun convertTerrains(ruleset: Ruleset, tiles: Iterable&lt;Tile&gt;) {
+    for (tile in tiles) {
+        <span class="comment">// ① 找基础地形的第一条命中规则</span>
+        val conversionUnique =
+            tile.getBaseTerrain().getMatchingUniques(
+                UniqueType.ChangesTerrain, GameContext(tile = tile))
+                .firstOrNull { tile.isAdjacentTo(it.params[1]) }
+            ?: continue
+        val terrain = ruleset.terrains[conversionUnique.params[0]]
+            ?: continue
+
+        <span class="comment">// ② Land 类：改写基础地形</span>
+        if (terrain.type != TerrainType.TerrainFeature)
+            tile.baseTerrain = terrain.name
+        <span class="comment">// ③ 特征类：先查 occursOn 允许</span>
+        else if (!terrain.occursOn.contains(tile.lastTerrain.name)) continue
+        else
+            tile.addTerrainFeature(terrain.name)
+        <span class="comment">// ④ 刷新缓存</span>
+        tile.setTerrainTransients()
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L330">convertTerrains · L330</a></p></div><div><p>① 原版规则集里挂这条 unique 的是 Tundra（→ Plains）、Desert（→ Flood plains）、Snow（→ Tundra），条件都是 “when adjacent to [River]”。isAdjacentTo 用的正是第 3 节的临河查询——<strong>荒漠挨着河变泛滥平原</strong>的因果链在这里闭合。REPL 实测前述 Small 图：5 条河画完后全图出现 2 格 Flood plains。</p><p>② 目标是 Land 就改基础地形：Tundra→Plains、Snow→Tundra 都是基础地形替换，一步到位，不需要别的许可。</p><p>③ 目标是<strong>特征</strong>（Desert→Flood plains）时多一道检查：特征不能凭空存在，只能叠在 occursOn 允许的基础地形上——规则集里 Flood plains 只 occursOn Desert（Terrains.json L281，Oasis 也一样）。是荒漠才叠，不是就 continue 跳过。检查用的是 <code>tile.lastTerrain.name</code>——lastTerrain 是“基础地形 + 特征”里最顶上那层（Tile.kt L969），特征叠特征时看最顶层允不允许。occursOn 是一道合法性门：防止出现“草原泛滥平原”这类任何规则都没定义过的组合，宁可不转，不转出非法状态。</p><p>④ 每格改完立即刷缓存。注意调用时机：整图生成时对所有格子跑一遍；编辑器单步画河时（generateSingleStep 的 Rivers 分支）只对 resultingTiles 跑——这就是 spawnRivers 留那个参数的原因。</p></div></div>
+<p>游戏内“把这块地变成 River”的能力走另一条路：continueRiverOn 在<strong>边</strong>上直接延伸河流（类注释特意把两个函数放在一起方便对比）。它给当前格的每条边算优先级——连海加分（除非已经有入海口）、接通开放端加分、形成三叉 Y 形减分——取最高优先级的一组随机挑一条，最后 setConnectedByRiver(..., convertTerrains = true) 落笔。你不需要记住优先级表的每个数，需要记住的是：<strong>生成期画河走顶点贪心长链，运行期加河走边级评分挑一条</strong>，两条路径最终都写同一组三布尔、都会触发 convertTerrains。运行期的 RNG 换成了 GameContext 的 stateBasedRandom（第七课讲过的 gameId 混入源），与生成期的 randomness.RNG 分属两套随机边界。</p>
+<p>最后把本课散见的<strong>约束与修正</strong>归成一张表。读法：<strong>第一列</strong>是谁加的约束（对象）；<strong>第二列</strong>是约束本身；<strong>第三列</strong>是“没有它会怎样”——即约束防住的坏结果；<strong>第四列</strong>是源码位置。按“形态约束”和“功能约束”分两组，前者管像不像山和河，后者管地图还能不能玩。</p>
+<table><thead><tr><th scope="col">对象</th><th scope="col">约束</th><th scope="col">防住什么</th><th scope="col">源码位置</th></tr></thead><tbody>
+<tr><td colspan="4"><strong>形态约束</strong>——让山成链、河成河</td></tr>
+<tr><td>孤山</td><td>0 个山邻 → 1/4 概率降级</td><td>满图撒点的孤立单峰</td><td>cellularMountainRanges L87</td></tr>
+<tr><td>链端</td><td>恰 1 个山邻的平地 → 1/10 概率升山</td><td>山链无法延伸</td><td>cellularMountainRanges L90</td></tr>
+<tr><td>孤丘/密丘</td><td>丘邻 ≤1 或 &gt;3 → 1/2 拆</td><td>孤丘乱冒、丘连成毯</td><td>cellularHills L135/L137</td></tr>
+<tr><td>丘的定位</td><td>山+丘邻合计 2..3 的平地才升丘</td><td>丘陵不围着山转</td><td>cellularHills L139</td></tr>
+<tr><td>河道蜿蜒</td><td>三候选取“最小距海”组内随机</td><td>河变成直线或乱走</td><td>spawnRiver L83</td></tr>
+<tr><td>河长兜底</td><td>repeat(maxRiverLength)（666）</td><td>极少数情况原地绕圈</td><td>spawnRiver L79</td></tr>
+<tr><td colspan="4"><strong>功能约束</strong>——保住可玩性</td></tr>
+<tr><td>山群密度</td><td>邻 3 个不可通行 → 1/2 降；&gt;3 必降</td><td>不可通行地形连片堵死大陆</td><td>cellularMountainRanges L93/L96</td></tr>
+<tr><td>源头离水</td><td>1..4 环内无水才可当源头</td><td>两三格入海的“水洼河”</td><td>isFarEnoughFromWater L49</td></tr>
+<tr><td>源头分散</td><td>chooseSpreadOutLocations 均匀撒</td><td>平行短河扎堆</td><td>spawnRivers L44</td></tr>
+<tr><td>数量预算</td><td>山目标 ×2 闸门、河 = 陆地 ×0.01</td><td>修形失控、河过密或过稀</td><td>兑现段 L104/L111、spawnRivers L32</td></tr>
+<tr><td>入海保障</td><td>无水地图直接不画河；终点逐环找水</td><td>纯陆地画河报错</td><td>spawnRivers L31、getClosestWaterTile L56</td></tr>
+</tbody></table>
+<aside class="callout tradeoff"><strong>取舍：为什么河存在边上而不是格子上</strong><p>格子模型（“这块地是河”）实现最简单，但文明系列里河的语义是“跨过它有代价、沿它有收益”——移动减速和攻击减益作用于<strong>过边</strong>，淡水和加成作用于<strong>两侧格子</strong>。边存储精确表达这个语义，代价是三布尔的归属规则（下半圈归自己）和双向查询的间接性。另一个隐性收益：存档里每条边只出现一次，天然避免两侧格子各存一份可能矛盾的数据。做自己的游戏时，如果河流只需要“格子临河加成”、没有跨河战斗语义，格子模型反而更省事——先想清楚规则要用到边的哪些语义，再选存储。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>山地丘陵两段式：scale=2 的小尺度噪声 + 保号幂定“种子”，两轮细胞自动机（挂标记→兑现，各 5 轮）把种子揉成链和群；Map Elevation 滑块改幂指数，指数越小山越多。</strong></li><li><strong>修形有预算闸门：山向“初始 ×2”靠拢，丘陵在 90%～100% 之间微调；~Raising~ / ~Lowering~ 是只活在内存里的假地形名。</strong></li><li><strong>河流是边属性：每格只存下半圈三布尔，上半圈查邻居；A 查 B 与 B 查 A 读同一个字段。</strong></li><li><strong>生成画河走顶点：顶点 = 格子 + 5/7 点钟；每步三候选按“最小距海”分组贪心 + 组内随机 = 蜿蜒入海；数量 = 陆地 ×0.01，源头优先离水 ≥5 环的山。</strong></li><li><strong>画完河的 convertTerrains 兑现 “Becomes X when adjacent to River”：荒漠→泛滥平原、冻土→草原、雪原→冻土；运行期加河走 continueRiverOn 的边级评分，另一套随机源。</strong></li><li><strong>约束分两类：形态约束（山成链、河蜿蜒）管观感，功能约束（不可通行不连片、源头离水、数量预算）管可玩性。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；不看正文讲清“幂指数和山数量的关系”“顶点走线为什么能画出河”，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. Map Elevation 滑块拉高后，指数与山数量怎样变化？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="方向反了：指数 = 1 − 滑块值，滑块拉高指数变小，不是变大。"><span>指数变大山变多</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="指数 = 1 − 滑块值（再减 boreal 偏移）；指数小 → 幂后值更高 → 0.7/0.5 阈值更容易过线，山和丘陵都变多。"><span>指数变小山变多</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="滑块不碰噪声 scale；scale 写死 2.0，管的是种子分布的疏密，与滑块无关。"><span>尺度变大山变多</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="修形目标 = 初始山数 × 2，初始山数由阈值切出，滑块先影响阈值切分，不是先改修形目标。"><span>目标翻倍山变多</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>2. A 与右上方邻居 B 之间的河，字段存在谁身上？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="各存一份会互相矛盾；每条边只有一个归属格，是边存储的核心设计。"><span>两边各自存一份</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="虚拟 River 地形只是产出与 unique 的挂载点，从不出现在格子上，也不存边数据。"><span>虚拟地形的条目</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="A 在 B 的 8 点钟方向；这条边是 B 的左下边。A 查 B、B 查 A 读的都是 B.hasBottomLeftRiver。"><span>记在B的布尔上</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="RiverMap 之类的结构不存在；全部河流状态就是 Tile 上那三个序列化布尔。"><span>独立河流的结构</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>3. 河流源头候选的第一优先级是什么？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="源头要求 1..4 环内无水（isFarEnoughFromWater），离水近的格子反而当不了源头。"><span>贴着水边的山</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="丘陵是第二级；第一级是 getBaseTerrain().isMountain 的格子——湖是河的源头讲的是 Boreal 的湖多。"><span>贴着水边的丘</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="chooseSpreadOutLocations 只管选点均匀，先得有候选表；候选表的三级排序在它之前。"><span>均匀分散的格</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="三级降级：山（且离水够远）→ 丘陵 → 任意陆地；山不够数才逐级放宽。"><span>山地且远离水</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. 荒漠挨着河变成泛滥平原，是哪段代码兑现的？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="convertTerrains 找到基础地形的 “Becomes [Flood plains] when adjacent to [River]” 命中后叠加特征；occursOn 只允许 Desert 承载。"><span>转换地形规则</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="applyTerrain 是山地丘陵阶段的落笔函数，不处理河岸转换。"><span>海拔落笔函数</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="isAdjacentToRiver 只是判定（转换的输入之一），写地形的是 convertTerrains。"><span>临河判定本身</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="spawnVegetation 按温湿撒森林丛林（第八课末尾提过），不管河岸。"><span>植被生成阶段</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：指数变小山变多；2：记在B的布尔上；3：山地且离够水；4：转换地形规则。分别对应 <a href="#elevation">幂与阈值</a>、<a href="#rivers">边存储</a>、<a href="#spawn">源头候选</a>、<a href="#constraints">convertTerrains</a>。</p></details>
+<h3>练习 A · 推演滑块与修形（6 分钟）</h3><p>三张相同 seed 的默认 perlin 图，分别只改一处：① Map Elevation 从 0.7 拉到 0.8；② 图类型换成 boreal（其他不动）；③ 假设把 cellularMountainRanges 的循环从 5 轮改成 1 轮。各自预测山地丘陵形态的变化，并说出源码依据。</p><details class="rubric"><summary>展开核对要点</summary><p>① 指数 0.3→0.2，山的幂前门槛从 ≈0.30 降到 ≈0.17（L46 与 L54 的代入），更多格子过 0.7 线成山；修形目标 = 初始 ×2，初始更多则目标也更高。② boreal 偏移 +0.03：指数 0.3→0.27，门槛 0.30→0.27，方向同①但幅度小；同时 boreal 湖多、离水候选少，河流源头更常从丘陵/陆地级出（spawnRivers 三级降级）。③ 1 轮时链端规则只延伸一次、孤山只拆一次：噪声切出的孤立斑点来不及连成链，山更接近阈值原始形态—— pepper 面而不是山脉。</p></details>
+<h3>练习 B · 手推一条河的前几步（8 分钟）</h3><p>在纸上画 3×3 六边形（平顶），中间格是源头山格，右下方是海。按 spawnRiver 的规则推演：① 起点顶点在哪两个里选？② 若选了 7 点钟顶点，写出它的三个相邻顶点（用"锚定格 + 5/7 点钟"表示）；③ 到哪一步循环会 return？最后用 paintTo 的分支判断说明第二步涂的是谁的哪条边。</p><details class="rubric"><summary>展开核对要点</summary><p>① 源头格的 5 点钟或 7 点钟顶点（BottomRightOrLeft.entries.random）。② 7 点钟顶点的相邻顶点：同格 5 点钟、左上格（x+1,y）的 5 点钟、左下格（x,y−1）的 5 点钟——rights 只挨 lefts。③ 当顶点 touches 的三格中任一是水时 return（getAdjacentTiles().any { it.isWater }）；走地图边界死角（候选全 null）也会 return。涂边：同格换侧涂锚定格正下边；移向"共同 touches 格"涂自己的左下/右下边；移向下方新格则让新坐标涂它锚定格的对应下边——落笔永远写归属格自己的三布尔。</p></details>
+<h3>练习 C · 比较两条加河路径（5 分钟）</h3><p>地图生成期的 spawnRiver 与游戏内的 continueRiverOn 都能画出一条河。从"坐标系、选择策略、随机源、落笔方式"四个方面各给一句对比，并说出它们最终汇合在哪两个点上。</p><details class="rubric"><summary>展开核对要点</summary><p>坐标系：顶点（格子+5/7 点钟）对边（六方向邻居）。策略：三候选按最小距海分组贪心+组内随机，对六邻边按连海/接通开放端/Y 形减分的优先级评分取最高组随机。随机源：生成期 randomness.RNG（种子属地图 seed 链），运行期 GameContext.stateBasedRandom（混入 gameId，第七课边界）。落笔：paintTo 的三个 paint 函数直接置布尔，对 setConnectedByRiver(..., convertTerrains = true) 统一入口。汇合点：都写同一组三布尔字段；都（直接或可选）触发 convertTerrains 的河岸转换。</p></details>
+<h3>练习 D · 本地核验（可选，5～10 分钟）</h3><p>跑 <code>:tests:test --tests "com.unciv.logic.map.MapGenerationTests"</code>。terrainTileCountsReasonableFor* 的断言里有 Mountain ≈ 212（六边 Small）和 Hill ≈ 1804。想想这两个数字钉住的是第 1 节（阈值切分）还是第 2 节（修形）？为什么断言用两倍容差而 flatEarth 的 Mountain 容差放宽到 4 倍（源码注释说山地数量“WIDLY unstable”）？</p><details class="rubric"><summary>展开核对要点</summary><p>两个数字都同时跨两节：阈值切分给初值，修形把山拉向 ×2 目标、丘陵在 ±10% 内微调——断言钉住的是两节叠加后的总量。不稳定来源：修形每轮用 RNG 决定挂标记概率（nextInt(until=4) 等），且 applyTerrain 组内 random 也动 RNG，种子相同的图统计上仍波动；flatEarth 的纬度分布让陆地块更碎，阈值初值方差更大，所以 4 倍容差。（本课程核对时 Gradle MCP 实测 4 过 0 失败。）</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt">MapElevationGenerator.kt</a> 全文（224 行，两个细胞自动机值得逐行读完，边读边在纸上画 3×3 六边形）；再读 <a href="../../core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt">RiverGenerator.kt</a> 的 spawnRivers 与 RiverCoordinate（类注释建议画图，照做）；最后 <a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">Tile.kt</a> 的 isConnectedByRiver / isAdjacentToRiver / setConnectedByRiver（L699 起）与 <a href="../../android/assets/jsons/Civ V - Vanilla/Terrains.json">Terrains.json</a> 的 Hill / Mountain / River / Flood plains 条目。山地河流速查见 <a href="reference/hexmath.html#elevation-rivers">地图速查 · 山地与河流</a>。</p><p>下次学习前，用两分钟默写：三布尔怎样覆盖六条边、幂指数与两个阈值的方向、顶点走线的三候选贪心；约一周后再做练习 A 和 B。如果记不清“为什么画河要绕道顶点”，回第 4 节看顶点 touches 三格的那段，别硬背结论。</p><p>有不清楚的分支，可以直接问教学助手。把你推演错的那条河和纸上画的图一起发来，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0008-landmass-climate.html">上一课：陆海与气候分布</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="0010-starts-resources.html">下一课：可玩的出生地与资源</a></div></section>
+<footer>资料核对：2026-09-15。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。REPL 实测：Small 六边图（seed 42）705 格 / 510 陆地 / 5 河 / 81 条河边 / 2 格泛滥平原；规则集常量 0.01/5/666。</footer>
+</main></div>
+</body>
+</html>

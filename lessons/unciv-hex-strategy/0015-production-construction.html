@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 · 生产力怎样完成建造 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>15 / 生产力怎样完成建造</strong><a href="#goal">目标、回顾与场景</a><a href="#state">1. 产出、进度和溢出</a><a href="#accumulate">2. 回合结束时累加进度</a><a href="#completion">3. 回合开始时检查完成</a><a href="#overflow">4. 多出的生产力去哪里</a><a href="#units">5. 单位生成与行动时机</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 50～60 分钟<br>承接第 01、13、14 课<br>含源码走读与手算<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第三阶段 / 经济专题 · 城市建造</div>
+<h1>生产力怎样完成建造</h1>
+<p class="lead">城市正在训练一个单位，成本是 40，已经投入 35，本回合还能投入 12。按下“下一回合”后，进度会达到 47，但单位并不会在本方回合结束的那一刻出现。<strong>本课沿着这 47 点进度，追到单位生成、多出的 7 点生产力，以及玩家何时能控制新单位。</strong></p>
+<p class="meta">源码基线：1df6249a41301056ddc4448a95a93ddf5403e061；核对日期：2026-09-24。本文讨论普通城市生产路径；购买、免费获得与加速建造在相应位置说明边界。中文注释为教学所加；摘录的省略和改写均单独标注。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<div class="paired equal"><div><h3>读完要能做什么</h3><ul><li>区分城市每回合生产力、项目已投入进度、尚未使用的溢出。</li><li>按调用顺序写出“本方结束 → 其他文明行动 → 本方开始”各阶段的状态。</li><li>手算完成后的溢出与下一个项目的进度，并解释新单位为什么此时才出现。</li></ul></div><div><h3>把旧课接上来</h3><p><a href="0013-tile-yields.html#city">第 13 课</a>把人口正在工作的地块等来源汇总到 <code>currentCityStats</code>；<a href="0014-population-growth.html#growth">第 14 课</a>把净粮食加进 <code>foodStored</code>，再判断是否增长。本课改看同一份统计中的 <code>production</code>。</p><p>边读边想：每回合产出与存量有什么区别？粮食增长和生产完成是否在同一阶段检查？答案会随源码给出，可以直接继续阅读。</p></div></div>
+<p>下面一直使用一个教学场景：队列先训练单位 A，再建建筑 B。A 的实际成本为 40、已有进度 35；B 的实际成本为 60、已有进度 0；城市没有旧溢出。本回合最终生产力为 <code>12.4f</code>，结算时取整为 12。城中心已有一个友方军事单位，但附近有可放置 A 的地块。这里的成本与产出是为验证而设定的输入，不是某个原版单位的固定数值。</p>
+<ol class="flow" aria-label="普通生产的回合顺序"><li><strong>本方回合结束</strong><span>把本回合生产力加入 A 的进度：35 → 47。</span></li><li><strong>其他文明行动</strong><span>A 尚未生成；此时地图上没有这个新单位。</span></li><li><strong>本方下回合开始</strong><span>检查成本、放置 A，成功后保留 7 点溢出。</span></li><li><strong>本方可以行动</strong><span>玩家可以控制 A；B 等本回合结束再获得生产力。</span></li></ol>
+<p class="source"><a href="0001-runtime-map.html">回看第 01 课的文明轮转</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L407">GameInfo.nextTurn · L407</a></p>
+<p class="meta">建议时间：场景与回顾 5 分钟；第 1～2 节 12 分钟；第 3～4 节 14 分钟；第 5 节 10 分钟；心智模型与练习 12～15 分钟。折叠扩展和本地重跑可另选时间。</p>
+</section>
+
+<section id="state"><h2>1. 产出、进度和溢出分别存在哪里</h2>
+<p>城市不会只保存一个“还差几回合”。它保存建造队列和每种项目的已投入进度，再根据当前产出估算剩余回合。换一个项目到队首，会改变本次生产投向哪里，却不等于把原项目的进度转给它。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CityConstructions 的相关字段与查询，省略其他成员。</span>
+var builtBuildings = HashSet&lt;String&gt;()             <span class="comment">// ① 已建成的建筑</span>
+val inProgressConstructions = HashMap&lt;String, Int&gt;() <span class="comment">// ② 按名称保存进度</span>
+var currentConstructionIsUserSet = false
+var constructionQueue = ArrayList&lt;String&gt;(queueMaxSize) <span class="comment">// ③ 队列决定顺序</span>
+var productionOverflow = 0                          <span class="comment">// ④ 待使用的溢出</span>
+
+<span class="comment">// 查询方法在源码中位于字段之前，此处单列。</span>
+@Readonly fun currentConstructionName() =
+    if (constructionQueue.isEmpty()) ""
+    else constructionQueue.first()                 <span class="comment">// ⑤ 当前项目是队首</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/CityConstructions.kt">本地 CityConstructions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L73">查询与字段 · L73</a></p></div><div>
+<p>① <code>builtBuildings</code> 记录城市已经拥有的建筑。单位建成后由文明的单位管理器和地图保存，不放进这个集合。</p>
+<p>② <code>inProgressConstructions</code> 以项目名称为键、整数进度为值。<code>getWorkDone(name)</code> 读取它；没有记录时返回 0。</p>
+<p>③ <code>constructionQueue</code> 只记录先后顺序。比如 A 调到 B 后面，合法项目 A 的已有进度仍保存在上面的 Map 中。</p>
+<p>④ <code>productionOverflow</code> 独立保存尚未加入新项目的生产力，不能把它当成 B 已有的进度。</p>
+<p>⑤ 普通生产每次只给队首项目增加进度。队列为空时返回空名称，后续会把它识别为空闲项目。</p>
+</div></div>
+<p>下表按“每回合数值”和“已经保存的数值”对照。它们都可能显示成生产力，但读取位置和变化时机不同。</p>
+<table><thead><tr><th scope="col">含义</th><th scope="col">读取位置</th><th scope="col">例子中的初值</th></tr></thead><tbody>
+<tr><td>城市当前每回合生产力</td><td><code>city.cityStats.currentCityStats.production</code>，浮点数</td><td>12.4</td></tr>
+<tr><td>A 已投入的进度</td><td><code>getWorkDone(A)</code>，整数</td><td>35</td></tr>
+<tr><td>尚未使用的溢出</td><td><code>productionOverflow</code>，整数</td><td>0</td></tr>
+<tr><td>A 当前实际成本</td><td><code>getProductionCost(city.civ, city)</code></td><td>40</td></tr>
+</tbody></table>
+<p>实际成本必须通过方法读取：难度、速度和规则效果可能让它不同于 JSON 中的 <code>cost</code>。当前生产力也已经包含城市统计阶段适用的修正，例如某建筑提供的“训练特定单位时增加生产力”。建造结算会消费这个最终数值。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Building.kt#L126">建筑实际成本 · L126</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L264">按建造对象筛生产加成 · L264</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L521">生产力百分数计算 · L521</a></p>
+</section>
+
+<section id="accumulate"><h2>2. 回合结束时，只把生产力累加到进度</h2>
+<p>先看第 14 课已经走过的 <code>CityTurnManager.endTurn</code>。城市在同一个方法中推进建造、文化扩张和人口，但这几项并不共用一套“达到阈值就立即完成”的规则。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CityTurnManager.endTurn 的部分代码。</span>
+<span class="comment">// 前面省略回合结束触发效果；末尾省略宗教、恢复与清理。</span>
+val stats = city.cityStats.currentCityStats           <span class="comment">// ① 读取当前城市统计</span>
+city.cityConstructions.endTurn(stats)                <span class="comment">// ② 先推进建造进度</span>
+city.expansion.nextTurn(stats.culture)                <span class="comment">// ③ 再推进文化扩张</span>
+if (city.isBeingRazed) {
+    <span class="comment">// ……省略夷平城市的分支</span>
+} else city.population.nextTurn(city.foodForNextTurn()) <span class="comment">// ④ 处理存粮与增长</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityTurnManager.kt">本地 CityTurnManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityTurnManager.kt#L160">endTurn · L160</a></p></div><div>
+<p>① 在城市的回合结束触发效果之后，取得当前的 <code>Stats</code>。这里读的是城市最终统计，不是把地块生产力重新相加。</p>
+<p>② 先把这份统计交给建造管理器；它具体做什么，要继续进入同名的 <code>CityConstructions.endTurn</code>。</p>
+<p>③ 文化扩张发生在生产进度累加之后。不要因为两个调用挨着，就把它们当成同一步状态变化。</p>
+<p>④ 普通城市随后处理粮食。若此时增长并安排了新人口，新人口的工作不会回头补进本次已经执行的生产累加。</p>
+</div></div>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CityConstructions.endTurn：完整方法，仅折行并添加中文注释。</span>
+fun endTurn(cityStats: Stats) {
+    validateConstructionQueue()                      <span class="comment">// ① 重新检查队列</span>
+    validateInProgressConstructions()
+
+    if (getConstruction(currentConstructionName())
+            !is PerpetualConstruction) {            <span class="comment">// ② 只处理有限成本项目</span>
+        if (getWorkDone(currentConstructionName()) == 0) {
+            constructionBegun(
+                getConstruction(currentConstructionName())) <span class="comment">// ③ 首次开工</span>
+        }
+        <span class="comment">// ④ 一次累加</span>
+        addProductionPoints(
+            cityStats.production.roundToInt() + productionOverflow)
+        productionOverflow = 0                      <span class="comment">// ⑤ 旧溢出已用掉</span>
+    }
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L351">endTurn · L351</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L461">constructionBegun · L461</a></p></div><div>
+<p>① 先校验队列和未完成项目：规则变化后，有的项目可能已失效。后续操作针对校验后的队首。本文的 A、B 始终合法。</p>
+<p>② <code>PerpetualConstruction</code> 表示没有普通完成成本的项目，例如空闲、生产力转其他产出的持续项目；它们跳过下面的累加。</p>
+<p>③ 已投入进度为 0 时，调用 <code>constructionBegun</code> 处理开工所需的库存资源和相关通知。已有进度的项目不会在每回合重复开工。</p>
+<p>④ 最终生产力先 <code>roundToInt()</code>，再加整数溢出。这里 <code>12.4 → 12</code>；输入若是 <code>9.5</code>，则得到 10。</p>
+<p>⑤ 这批溢出已经转入队首进度，所以清零，防止下回合再加一次。方法到这里就结束了，没有在末尾检查是否达到成本。</p>
+</div></div>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CityConstructions.addProductionPoints：完整方法，调整折行。</span>
+fun addProductionPoints(productionToAdd: Int) {
+    val constructionName = currentConstructionName() <span class="comment">// ① 获取当前项目</span>
+    val construction = getConstruction(constructionName)
+    if (construction is PerpetualConstruction) {
+        productionOverflow += productionToAdd         <span class="comment">// ② 直接加点时的特殊分支</span>
+        return
+    }
+    if (!inProgressConstructions.containsKey(constructionName))
+        inProgressConstructions[constructionName] = 0 <span class="comment">// ③ 新项目从零开始</span>
+    <span class="comment">// ④ 保存新进度</span>
+    inProgressConstructions[constructionName] =
+        inProgressConstructions[constructionName]!! + productionToAdd
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L310">addProductionPoints · L310</a></p></div><div>
+<p>① 增加生产点数时，再从队首取得项目名称，因此它明确知道该更新 Map 的哪个键。</p>
+<p>② 这个公共方法也供一次性生产奖励等路径调用。如果直接调用时当前是持续项目，会把点数存为溢出。刚才的普通 <code>endTurn</code> 已排除持续项目，不会进入这条分支。</p>
+<p>③ Map 没有该项目的进度时，先补上 0。</p>
+<p>④ A 的进度变为 <code>35 + 12 + 0 = 47</code>，方法不把它截断到 40，也不生成单位。超出成本的部分仍包含在这 47 点里。</p>
+</div></div>
+<p class="callout"><strong>和粮食增长作一次对照：</strong>人口管理器在回合结束的 <code>nextTurn</code> 中加存粮并检查增长；建造管理器的 <code>endTurn</code> 只增加进度。此时 A 的进度已经超过成本，却仍未完成，<code>productionOverflow</code> 也仍是 0。</p>
+</section>
+
+<section id="completion"><h2>3. 本方下一回合开始时，才尝试完成</h2>
+<p><code>constructIfEnough()</code> 的普通回合调用入口在 <code>CityTurnManager.startTurn</code>。这里的“开始”指轮到这座城市所属文明，不是只看全局回合数字是否增加。其他文明可能已经在两次调用之间完成了行动。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CityTurnManager.startTurn 的部分代码。</span>
+city.clearCaches()                                   <span class="comment">// ① 清除相关缓存</span>
+<span class="comment">// ……省略城市库存资源与回合开始触发效果</span>
+city.cityConstructions.constructIfEnough()           <span class="comment">// ② 尝试完成建造</span>
+<span class="comment">// ……省略道路、城市标记等处理</span>
+if (city.isPuppet) {
+    city.setCityFocus(CityFocus.GoldFocus)
+    city.reassignAllPopulation()
+} else if (city.shouldReassignPopulation || city.civ.isAI()) {
+    if (city.civ.isAI()) city.setCityFocus(chooseCityFocus())
+    city.reassignPopulation()
+} else
+    city.cityStats.update()                          <span class="comment">// ③ 随后重新分配或更新统计</span></code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityTurnManager.kt#L23">startTurn · L23</a></p></div><div>
+<p>① 开始城市回合时先清缓存，随后还会处理库存资源与回合开始触发效果。不能把“开始时完成”理解成这个方法的第一行。</p>
+<p>② 对已积累的进度执行完成检查。它也可能发现项目失效或单位无处放置，因此方法名里的“足够”不代表一定成功。</p>
+<p>③ 完成检查之后才进入这一轮人口重新分配与城市统计更新。这承接第 14 课的 <code>shouldReassignPopulation</code>；完成建筑等内部操作也可能提前触发统计更新。</p>
+</div></div>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CityConstructions.constructIfEnough 的普通项目分支。</span>
+<span class="comment">// 省略 timeThis 包装、持续项目分支、通知及递增成本计数。</span>
+validateConstructionQueue()                          <span class="comment">// ① 再次校验</span>
+validateInProgressConstructions()
+val constructionName = currentConstructionName()
+val construction = getConstruction(constructionName)
+<span class="comment">// ……持续项目走 chooseNextConstruction；下面位于 else 中</span>
+val productionCost = (construction as INonPerpetualConstruction)
+    .getProductionCost(city.civ, city)                <span class="comment">// ② 此时的实际成本</span>
+<span class="comment">// ③ 达到成本</span>
+if (inProgressConstructions.containsKey(constructionName)
+        &amp;&amp; inProgressConstructions[constructionName]!! &gt;= productionCost) {
+    <span class="comment">// ④ 先记超出部分</span>
+    val potentialOverflow =
+        inProgressConstructions[constructionName]!! - productionCost
+    if (completeConstruction(construction)) {        <span class="comment">// ⑤ 尝试实际建成</span>
+        <span class="comment">// ⑥ 成功后存有上限的溢出</span>
+        val maxOverflow = maxOf(productionCost,
+            city.cityStats.currentCityStats.production.roundToInt())
+        productionOverflow = min(maxOverflow, potentialOverflow)
+    } else {
+        <span class="comment">// ……通知玩家：单位附近没有可用位置</span>
+    }
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L322">constructIfEnough · L322</a></p></div><div>
+<p>① 再校验一次，因为其他文明的行动或新回合效果可能改变可建造条件。例如某个世界奇观可能已被别人建成。</p>
+<p>② 使用此时的 <code>getProductionCost</code> 返回值，不能只记住开工时的 JSON 成本。本文固定为 40。</p>
+<p>③ 要有该项目的进度记录，并且进度大于或等于成本。A 的 <code>47 ≥ 40</code> 成立；若只有 39，这段不会执行。</p>
+<p>④ 先算出 <code>47 − 40 = 7</code>。这时它只是局部变量；下面成功完成时，原项目的进度记录会被删除。</p>
+<p>⑤ <code>completeConstruction</code> 负责实际建成建筑或创建、放置单位。只有它返回 <code>true</code>，才进入溢出赋值。</p>
+<p>⑥ 在成功之后读取城市生产力缓存，计算上限，再写入 <code>productionOverflow</code>。这里没有继续完成后续项目的循环。</p>
+</div></div>
+<p>到这里可以区分三个动作：<strong>达到成本、实际建成、记录溢出</strong>。达到成本会触发一次尝试；只有建成成功，才清理原项目并保存这次算出的溢出。单位如何放置，留到第 5 节追踪。</p>
+<details><summary>边界：不是所有“完成建造”都等待下一回合</summary><p>本课的时序针对普通回合生产。<code>UnitActionsGreatPerson</code> 的加速奇观动作会先调用 <code>addProductionPoints</code>，随即调用 <code>constructIfEnough</code>；生产足够时可以在当前行动中完成。购买则通过 <code>purchaseConstruction</code> 直接调用建筑或单位的 <code>construct</code>；免费建筑也有直接调用 <code>completeConstruction</code> 的路径。因此应从调用方判断完成时机。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/unit/actions/UnitActionsGreatPerson.kt#L49">加速奇观 · L49</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L751">购买的构造入口 · L751</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/CivConstructions.kt#L127">免费建筑调用 · L127</a></p></details>
+</section>
+
+<section id="overflow"><h2>4. 多出的生产力不会立刻完成下一个项目</h2>
+<p>“溢出”在这里就是完成一个项目后，多出的生产力中允许保留的部分。按刚才的代码，计算顺序如下。这里的“缓存生产力”特指 <code>completeConstruction</code> 成功返回之后，在上限计算那一行读取到的值。</p>
+<pre><code>候选溢出 = 原项目进度 − 本次检查得到的实际成本
+溢出上限 = max(本次实际成本, roundToInt(此时缓存生产力))
+保存的溢出 = min(候选溢出, 溢出上限)
+
+下一次普通生产结算：
+新项目进度 += roundToInt(本回合最终生产力) + 保存的溢出
+保存的溢出 = 0</code></pre>
+<p>回到 A、B：A 的成本为 40，多出的 7 小于上限的最低值 40，因此全部保留。假定本方新回合结束时，城市给 B 的最终生产力是 <code>9.5f</code>，取整为 10，B 才会获得 <code>10 + 7 = 17</code> 点进度。</p>
+<p>表中每行表示一个阶段结束后的状态。“A 进度为 0（已删除）”是 <code>getWorkDone(A)</code> 的读数；不表示把完成后的 A 留在队列里从零重建。</p>
+<div class="table-wrap wide" tabindex="0" role="region" aria-label="建造各阶段状态，窄屏可横向滚动">
+<table id="production-states"><thead><tr><th scope="col">阶段</th><th scope="col">队首</th><th scope="col">A 的进度</th><th scope="col">B 的进度</th><th scope="col">保存的溢出</th><th scope="col">A 单位是否存在</th></tr></thead><tbody>
+<tr><td>本方回合结束前</td><td>A</td><td>35 / 40</td><td>0 / 60</td><td>0</td><td>否</td></tr>
+<tr><td>本方 <code>endTurn</code> 后</td><td>A</td><td>47 / 40</td><td>0 / 60</td><td>0</td><td>否</td></tr>
+<tr><td>其他文明行动期间</td><td>A</td><td>47 / 40</td><td>0 / 60</td><td>0</td><td>否</td></tr>
+<tr><td>本方下回合开始，A 成功建成</td><td>B</td><td>0（记录已删除）</td><td>0 / 60</td><td>7</td><td>是</td></tr>
+<tr><td>本方行动期间，未发生生产奖励等额外变化</td><td>B</td><td>0</td><td>0 / 60</td><td>7</td><td>是，可控制</td></tr>
+<tr><td>本方本次回合结束，B 获得 10 + 7</td><td>B</td><td>0</td><td>17 / 60</td><td>0</td><td>是</td></tr>
+</tbody></table></div>
+<p class="callout"><strong>每一步都有单独保存的位置：</strong>47 点先属于 A 的进度；完成后保留的 7 点转为城市的溢出；再到下一次普通生产结算，7 点才加入当时的队首。即使溢出足以支付 B 的成本，这次完成检查也不会自动连续完成 B。</p>
+<h3>上限究竟限制什么</h3>
+<p>下面用两个已经实测的场景说明 <code>max</code> 和 <code>min</code> 各管什么。两种建筑的实际成本都是 40，完成前的进度都是 200，因此候选溢出都是 160；差异只在建成后读取到的城市生产力。</p>
+<table><thead><tr><th scope="col">场景</th><th scope="col">上限计算处的缓存生产力</th><th scope="col">上限</th><th scope="col">最终保留</th></tr></thead><tbody>
+<tr><td>建筑不增加生产力</td><td>1</td><td>max(40, 1) = 40</td><td>min(160, 40) = 40</td></tr>
+<tr><td>新建筑提供 100 生产力，城市原有 1</td><td>101</td><td>max(40, 101) = 101</td><td>min(160, 101) = 101</td></tr>
+</tbody></table>
+<p>第二行为什么能读到新建筑的产出？<code>Building.construct → addBuilding → updateUniques → cityStats.update</code> 会在完成过程中更新统计。上限那一行位于 <code>completeConstruction</code> 返回之后，所以不能擅自把它改写成“固定使用上回合投入的生产力”或“总是等于项目成本”。也不要假定此时的缓存必然就是下一项目的最终预测值，仍要看更新发生时的队列与调用顺序。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Building.kt#L489">Building.construct · L489</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L578">addBuilding · L578</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L679">updateUniques · L679</a></p>
+<p>当前实现对超过上限的部分直接不予保留；这个成功完成分支没有把差额转换为黄金。另外，<code>endTurn</code> 把已保存的溢出直接加到最终生产力上，不再给溢出乘一次新项目的生产加成。例如，新项目的正常生产力经 +100% 加成后已经是 2，旧溢出为 7，本次增加的是 <code>2 + 7 = 9</code>，不是 <code>(1 + 7) × 2 = 16</code>。</p>
+<details><summary>换队首、空闲和项目失效时，应该分别看哪里</summary><ul><li><strong>换队首：</strong>合法的未完成项目按名称保留进度。A 已投入 20，改为建 B 并投入 12 后，可以同时有 A=20、B=12。</li><li><strong>空闲或持续转化：</strong><code>endTurn</code> 跳过普通累加，旧溢出暂时保留；不是每空闲一回合就把当回合生产力继续攒进溢出。生产力转科学或黄金由城市统计中的转化逻辑处理。</li><li><strong>项目失效：</strong><code>validateInProgressConstructions</code> 有另外的处理，例如失去建造资格的世界奇观可以退还黄金，某些过时单位的进度可以转给可建造的升级版本。这与成功完成时的溢出封顶是不同分支。</li></ul><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L413">失效项目处理 · L413</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L990">调整队首 · L990</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L119">生产力转化 · L119</a></p></details>
+</section>
+
+<section id="units"><h2>5. 单位怎样出现，为什么此时才出现</h2>
+<p>成本足够后，<code>completeConstruction</code> 会按项目类型执行实际建造。建筑进入城市的已建成集合；单位则要成为地图上的一个实例。单位放置失败时，不能先把原进度删除。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CityConstructions.completeConstruction 的部分代码。</span>
+fun completeConstruction(construction: INonPerpetualConstruction): Boolean {
+    var unit: MapUnit? = null
+    if (construction is Building)
+        construction.construct(this)                <span class="comment">// ① 建筑进入城市</span>
+    else if (construction is BaseUnit) {
+        unit = construction.construct(this, null)
+            ?: return false                         <span class="comment">// ② 单位放置失败即返回</span>
+        <span class="comment">// ……省略保存的晋升方案处理</span>
+    }
+    if (construction.name in inProgressConstructions)
+        inProgressConstructions.remove(construction.name) <span class="comment">// ③ 成功才删除进度</span>
+    if (construction.name == currentConstructionName())
+        removeCurrentConstruction()                 <span class="comment">// ④ 移除完成的队首</span>
+    validateConstructionQueue()                     <span class="comment">// ⑤ 检查后续队列</span>
+    <span class="comment">// ……省略完成通知等处理</span>
+    return true                                     <span class="comment">// ⑥ 向调用方报告成功</span>
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L485">completeConstruction · L485</a></p></div><div>
+<p>① 普通建筑通过 <code>Building.construct</code> 调用 <code>addBuilding</code>，更新已建成建筑、规则效果与相关统计。</p>
+<p>② 单位分支传入的第二个参数是 <code>null</code>，表示这次不是用黄金等产出购买。返回 <code>null</code> 就立即报告失败，下面的清理不会执行。</p>
+<p>③ 成功后删除这个名称对应的进度记录，而不是让 Map 永远保留一项已完成的 40 点进度。</p>
+<p>④ 如果完成的正是队首，就移除它。本文队列从 A、B 变为 B；同名单位排多次时，下一次训练重新累积进度。</p>
+<p>⑤ 完成一个建筑可能让队列中的另一项不再需要或不再合法，因此重新检查队列。这不是给后续项目增加生产力。</p>
+<p>⑥ 返回 <code>true</code> 后，外面的 <code>constructIfEnough</code> 才计算并保存溢出。</p>
+</div></div>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// BaseUnit.construct：完整方法，调整折行。</span>
+fun construct(
+    cityConstructions: CityConstructions, boughtWith: Stat?
+): MapUnit? {
+    val civInfo = cityConstructions.city.civ
+    val unit = civInfo.units.addUnit(this, cityConstructions.city)
+        ?: return null                              <span class="comment">// ① 创建并尝试放置</span>
+    if (boughtWith != null
+            &amp;&amp; !civInfo.gameInfo.gameParameters.godMode
+            &amp;&amp; !unit.hasUnique(UniqueType.CanMoveImmediatelyOnceBought))
+        unit.currentMovement = 0f                   <span class="comment">// ② 购买的移动惩罚</span>
+    addConstructionBonuses(unit, cityConstructions)  <span class="comment">// ③ 训练带来的奖励</span>
+    return unit                                     <span class="comment">// ④ 返回实际单位</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/models/ruleset/unit/BaseUnit.kt">本地 BaseUnit.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unit/BaseUnit.kt#L356">construct · L356</a></p></div><div>
+<p>① 文明的 <code>UnitManager.addUnit</code> 负责选择生成城市并继续调用地图放置方法。陆地单位通常以传入的这座城市为起点找位置。</p>
+<p>② 购买单位通常会把当前移动力清零；普通生产传入 <code>null</code>，不会进入这个购买惩罚分支。特殊规则与上帝模式也有明确例外。</p>
+<p>③ 再应用城市提供的初始经验与晋升等建造奖励。</p>
+<p>④ 返回的是已经创建的 <code>MapUnit</code> 实例。原来的 <code>BaseUnit</code> 仍是规则集里的单位定义，回指第 02～03 课的定义与实例之分。</p>
+</div></div>
+<h3>城中心已被占用，单位会去哪里</h3>
+<p>调用链是 <code>BaseUnit.construct → UnitManager.addUnit → UnitManager.placeUnitNearTile → TileMap.placeUnitNearTile</code>。地图层先试城中心；不能停放时，从可通行的邻格继续找可停放的位置，并设有最多 10 轮的搜索限制。普通受水域限制的陆地单位优先选陆地。它不是直接把单位强行叠到城中心。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// TileMap.placeUnitNearTile 的部分代码。</span>
+<span class="comment">// 前面已创建 unit、设置所属文明和临时位置。</span>
+if (unit.movement.canMoveTo(currentTile))
+    unitToPlaceTile = currentTile                    <span class="comment">// ① 优先试原位置</span>
+<span class="comment">// ……找不到时，沿可通行邻格搜索，检查 canMoveTo；最多 10 轮</span>
+if (unitToPlaceTile == null) {
+    civInfo.units.removeUnit(unit, updateCivInfo = false)
+    return null                                     <span class="comment">// ② 无位置则撤销临时登记</span>
+}
+unit.putInTile(unitToPlaceTile)                      <span class="comment">// ③ 放入地块</span>
+unit.currentMovement = unit.getMaxMovement().toFloat() <span class="comment">// ④ 初始化移动力</span>
+unit.addMovementMemory()
+<span class="comment">// ……随后处理晋升、文明统计与资源刷新</span></code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/UnitManager.kt#L53">UnitManager.addUnit · L53</a><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L673">placeUnitNearTile · L673</a></p></div><div>
+<p>① <code>canMoveTo</code> 判定能否停放，承接第 11 课的通行规则。城中心已有同类占位、或其他条件不允许时，才搜索附近位置。</p>
+<p>② 找不到位置则从文明单位集合移除刚才临时登记的单位并返回 <code>null</code>。失败一路返回到 <code>completeConstruction</code>，不会进入进度删除。</p>
+<p>③ 找到位置后才正式把单位放进地块。本文 A 会出现在附近可用地块上，而原先的守军仍在城中心。</p>
+<p>④ 放置后初始化为最大移动力。最终是否还能行动仍受后续规则、自动行动与移动合法性影响。</p>
+</div></div>
+<p class="callout"><strong>达到成本但放不下：</strong>在 A=47、成本=40、旧溢出=0 的场景中，若所有可用位置都被堵住，完成失败后仍是 A=47、队首=A、溢出=0；玩家会收到无处放置的通知。腾出位置后再次检查可以完成。普通回合路径在后续回合开始重试，单纯挪开挡路单位不等于此方法立即再次运行。</p>
+<h3>城市开始处理在前，单位开始处理在后</h3>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// TurnManager.startTurn 的部分代码。</span>
+<span class="comment">// 前面省略文明资源、科技等处理。</span>
+for (city in civInfo.cities) {
+    progressBar?.increment()
+    CityTurnManager(city).startTurn()                <span class="comment">// ① 先完成各城市建造</span>
+}
+for (unit in civInfo.units.getCivUnits())
+    UnitTurnManager(unit).startTurn()                <span class="comment">// ② 再开始所有单位的回合</span>
+<span class="comment">// ……随后可能执行设置允许的回合开始自动行动</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/civilization/managers/TurnManager.kt">本地 TurnManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L69">城市与单位的顺序 · L69</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/UnitTurnManager.kt#L138">单位移动力与攻击次数重置 · L138</a></p></div><div>
+<p>① 先执行所有城市的开始处理，A 在这里生成并进入文明的单位集合。</p>
+<p>② 随后取得单位序列，因此也会处理刚生成的 A。<code>UnitTurnManager.startTurn</code> 重置移动力、令 <code>attacksThisTurn = 0</code>，并设置 <code>due = true</code>。正常训练出的单位在这次本方回合就可以行动，不必再空等一轮。</p>
+</div></div>
+<p>源码在城市开始方法中直接写明原因：<strong>避免单位先生成在城外，在玩家还不能控制它之前就受到敌人攻击。</strong>如果把生成移到本方结束时，接下来其他文明先行动，刚被放到城外的单位就已经是可攻击目标；推迟到本方开始，玩家能在这次行动阶段决定让它撤回、移动或参战。这是在安排游戏规则的先后关系，不是等待生成动画播完。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityTurnManager.kt#L34">源码对生成时机的解释 · L34</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L476">人类行动前开始回合 · L476</a></p>
+<aside class="callout"><strong>Godot tip：先决定单位何时成为游戏状态，再显示节点</strong><p>如果自己的回合制游戏也希望新兵出现后，所属玩家先有机会下达命令，可以把逻辑单位的创建安排在本方行动阶段之前，随后由表现层显示对应节点。仅仅延迟节点显示并不能保护已经进入战斗判定的单位。即时制游戏则要另行决定训练完成后的可操作时机和出生位置；不要直接照搬 Unciv 的回合边界。本课只比较规则设计，不要求实现 Godot 工程。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul>
+<li><strong>每回合产出、项目进度和溢出是三个数。</strong><code>currentCityStats.production</code> 提供本回合数值，Map 保存各项目进度，<code>productionOverflow</code> 保存尚未使用的结余。</li>
+<li><strong>普通生产在结束时加进度，在本方下回合开始时检查完成。</strong>达到成本与单位已经出现在地图上，是两个不同状态。</li>
+<li><strong>完成必须先成功，才能删除原进度并保存这次溢出。</strong>单位放置失败会保留进度，后续检查可以重试。</li>
+<li><strong>溢出先封顶，再等下一次生产结算。</strong>上限取实际成本与完成后该行读到的城市生产力整数值中较大者；不会当场循环完成整个队列。</li>
+<li><strong>新单位赶上本方这次行动。</strong>城市先生成单位，随后统一开始单位回合，避免玩家控制之前先经历敌方行动。</li>
+</ul></section>
+
+<section id="practice"><h2>检索与推演</h2>
+<p>先不看正文作答。选择题检验四个容易混淆的判断；再用练习 A 把数值与时序连起来。每题都可重试，下面也有无需 JavaScript 的答案。</p>
+<noscript><p>浏览器未启用 JavaScript，请展开“选择题答案与核对位置”自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. A 成本 40，已有进度 35，本回合最终生产力 12.4，无旧溢出。普通 endTurn 刚执行完时，状态是什么？</legend>
+<label class="option"><input required type="radio" name="q1" value="a" data-feedback="endTurn 只累加进度，没有调用完成检查。此时单位尚未生成，多出的部分也还没有写入 productionOverflow。"><span>A 已生成，保存 7 点溢出。</span></label>
+<label class="option"><input required type="radio" name="q1" value="b" data-feedback="12.4 取整为 12，35 + 12 = 47；endTurn 没有完成检查，所以单位未生成，溢出字段仍为 0。"><span>A 的进度是 47，单位未生成，溢出字段仍为 0。</span></label>
+<label class="option"><input required type="radio" name="q1" value="c" data-feedback="addProductionPoints 不会把进度截断到成本。它保存 47，等完成检查时再计算候选溢出和上限。"><span>A 的进度停在 40，多出的 7 点当场丢弃。</span></label>
+<label class="option"><input required type="radio" name="q1" value="d" data-feedback="回合结束已经把生产力加入进度；推迟的是完成检查，不是生产力累加。"><span>A 的进度仍为 35，下一回合开始再加入 12。</span></label>
+</fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>2. 某项目完成前进度为 200，实际成本 40；completeConstruction 成功返回后，上限计算处读到城市生产力 101。保留多少溢出？</legend>
+<label class="option"><input required type="radio" name="q2" value="a" data-feedback="160 是候选溢出 200 − 40，还必须受 max(40, 101) = 101 的上限限制。"><span>160，超出成本的部分全部保留。</span></label>
+<label class="option"><input required type="radio" name="q2" value="b" data-feedback="上限不是固定成本，而是成本与此时城市生产力取较大者。本题上限为 101。"><span>40，上限始终等于项目成本。</span></label>
+<label class="option"><input required type="radio" name="q2" value="c" data-feedback="101 用来参与计算上限，不是再次从候选溢出中扣除的成本；不能用 160 − 101。"><span>59，要从候选溢出中再扣除 101。</span></label>
+<label class="option"><input required type="radio" name="q2" value="d" data-feedback="候选溢出 200 − 40 = 160，上限 max(40, 101) = 101，最终 min(160, 101) = 101。"><span>101，取候选溢出与上限中的较小值。</span></label>
+</fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>3. A 已成功完成，B 成为队首且原进度为 0，保存溢出为 7。没有额外生产奖励；B 本回合最终生产力为 9.5。B 何时得到多少进度？</legend>
+<label class="option"><input required type="radio" name="q3" value="a" data-feedback="B 等到本方本次回合结束，获得 roundToInt(9.5) + 7 = 17 点进度，随后溢出清零。"><span>本方本次回合结束时增加 17，溢出归零。</span></label>
+<label class="option"><input required type="radio" name="q3" value="b" data-feedback="A 完成只保存溢出，并未把它立刻加入 B；本回合生产力也要等结束时结算。"><span>A 完成的同一时刻，B 立刻增加 17。</span></label>
+<label class="option"><input required type="radio" name="q3" value="c" data-feedback="endTurn 同时加入当前生产力和旧溢出，不能只转入溢出而忽略本回合的 10 点生产力。"><span>本方本次回合结束时只增加 7。</span></label>
+<label class="option"><input required type="radio" name="q3" value="d" data-feedback="inProgressConstructions 保存整数；9.5 在累加前 roundToInt 为 10，不会留下 16.5 的进度。"><span>本方本次回合结束时增加 16.5。</span></label>
+</fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>4. 为什么普通训练出的单位安排在本方回合开始时生成？</legend>
+<label class="option"><input required type="radio" name="q4" value="a" data-feedback="不是等待动画完成。生成是地图和文明状态的变化，回合调用顺序决定它何时成为可攻击目标。"><span>必须等上一轮所有建造动画播放完。</span></label>
+<label class="option"><input required type="radio" name="q4" value="b" data-feedback="新单位也会进入随后执行的 UnitTurnManager.startTurn，正常情况下本方这次回合就能行动。"><span>为了强制新单位再休息一整个回合。</span></label>
+<label class="option"><input required type="radio" name="q4" value="c" data-feedback="城中心被占用时新单位可能放在城外；若在本方结束时生成，其他文明会先行动。推迟到本方开始，让玩家在这次行动阶段获得控制机会。"><span>让玩家先有机会控制新单位，再轮到敌方行动。</span></label>
+<label class="option"><input required type="radio" name="q4" value="d" data-feedback="生产力在本方结束时已经加入进度；开始时处理的是完成检查和单位生成。"><span>因为城市到回合开始时才累加生产力。</span></label>
+</fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric" id="quiz-answers"><summary>选择题答案与核对位置</summary><ol><li><strong>B：</strong>A 进度 47，单位未生成，溢出字段仍为 0。见 <a href="#accumulate">回合结束时累加进度</a>。</li><li><strong>D：</strong>保留 101；<code>min(200 − 40, max(40, 101)) = 101</code>。见 <a href="#overflow">溢出上限</a>。</li><li><strong>A：</strong>本方本次回合结束时 B 增加 17，溢出归零。见 <a href="#production-states">阶段状态表</a>。</li><li><strong>C：</strong>让玩家先有机会控制新单位，再轮到敌方行动。见 <a href="#units">单位生成与行动时机</a>。</li></ol></details>
+<h3>练习 A · 改一组数字，重建状态表（6 分钟）</h3>
+<p>普通生产，单位 A 实际成本 40，已有进度 38，旧溢出为 5；本方这次结束时最终生产力为 8.6。队列下一项 B 成本 60、已有进度 6。所有项目一直合法、放置成功，A 完成后上限计算处的城市生产力为 10。下次给 B 结算时，最终生产力为 6.4。请写出三个时点的 A 进度、B 进度、保存溢出和 A 是否存在：本次结束后、下次开始完成后、再下一次结束后。</p>
+<details class="rubric"><summary>展开推演结果</summary><table><thead><tr><th scope="col">时点</th><th scope="col">A 进度</th><th scope="col">B 进度</th><th scope="col">溢出</th><th scope="col">A 单位</th></tr></thead><tbody><tr><td>本次结束后</td><td>38 + 9 + 5 = 52</td><td>6</td><td>0</td><td>不存在</td></tr><tr><td>下次开始，完成成功后</td><td>记录删除，读取为 0</td><td>6</td><td>min(52 − 40, max(40, 10)) = 12</td><td>已生成</td></tr><tr><td>随后本方回合结束后</td><td>0</td><td>6 + 6 + 12 = 24</td><td>0</td><td>已存在，可在本方行动阶段受控</td></tr></tbody></table><p>关键不是只算出 24，而是解释两次溢出清零：第一次把旧 5 点投入 A；第二次把新 12 点投入 B。B 原有的 6 点一直按名称保留。</p></details>
+<h3>练习 B · 进度够了，地图上却没有新单位（4 分钟）</h3>
+<p>A 成本 40、进度 47、旧溢出 0，项目仍合法。轮到本方开始时，可搜索到的位置全部无法停放 A。① 这次检查后应保留哪些状态？② 该从哪个返回值判断失败？③ 另设附近有合法空位：如果把生成移到本方结束时，会改变哪一方先有行动机会？</p>
+<details class="rubric"><summary>展开核对要点</summary><p>① 队首仍为 A、A 进度仍为 47、溢出仍为 0，没有新单位留在地图上。② 从 <code>TileMap.placeUnitNearTile</code> 的 <code>null</code> 沿调用链返回，最终 <code>completeConstruction</code> 返回 <code>false</code>；不能只看进度是否大于成本。③ 本方结束后轮到其他文明，敌方可能先攻击这个新单位，玩家还没机会控制它。正确放置还必须遵守 <code>canMoveTo</code> 等规则。</p></details>
+<h3>练习 C · 找到证据并复跑（可选，10 分钟）</h3>
+<p>已有 <a href="../../tests/src/com/unciv/uniques/GlobalUniquesTests.kt">GlobalUniquesTests</a> 的 <code>percentProductionUnits</code> 等 4 个测试证明生产加成会按建造对象筛选，但没有直接证明普通建造的完成时序与溢出。课程另附本次实际运行的 <a href="verification/Lesson15ProductionProbeTest.kt">Lesson15ProductionProbeTest.kt</a>，共 5 个场景，覆盖状态表、封顶、放置失败重试、切换与空闲、溢出不重复乘加成。</p>
+<p>若要重跑，将附带文件临时放入 <code>tests/src/com/unciv/logic/city/</code>，通过 Gradle MCP 或 IDE 执行下面的测试任务参数。完成后可以移除测试目录中的临时副本，课程目录保留原文件供复查。测试直接设置部分进度和产出，以隔离本课机制；它不是完整游戏对局，也没有模拟敌方战斗。</p>
+<pre><code>:tests:test
+--tests com.unciv.logic.city.Lesson15ProductionProbeTest
+--tests com.unciv.uniques.GlobalUniquesTests.percentProduction*
+--rerun</code></pre>
+<details class="rubric"><summary>本次实际验证了什么</summary><p>2026-09-24 运行结果：本课 5 个场景与既有 4 个测试，共 9 项通过，0 失败、0 跳过。第一项场景调用真实 <code>CityTurnManager.endTurn</code> 和文明 <code>TurnManager.startTurn</code>，断言 35→47、结束时无新单位、开始时在非城中心格生成且移动力为 2、溢出 7、B 下次进度 17。第二项验证成本 40、进度 200 时分别保留 40 和 101。其余场景验证失败保留与重试、不同项目独立保存进度、空闲保留旧溢出、加成后的 2 与旧溢出 7 合计为 9。</p><p>本次没有在现有测试中找到直接调用 <code>constructIfEnough</code> 或断言 <code>productionOverflow</code> 的用例，因此补充了这些教学验证。生成时机的设计原因以源码注释与回合调用链为证据；测试通过不代表学习者已经完成练习。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2>
+<p><strong>建议按这个顺序读：</strong>先看 <code>CityConstructions.endTurn</code> 和 <code>constructIfEnough</code> 的差别，再沿 <code>completeConstruction → BaseUnit.construct → TileMap.placeUnitNearTile</code> 追踪返回值，最后回到两个回合管理器确认调用位置。下面的链接固定到本课源码版本。</p>
+<ol><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L310">CityConstructions：加点、完成检查与结束结算</a>。</li><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L485">completeConstruction：先建成，再清理进度和队列</a>。</li><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unit/BaseUnit.kt#L356">BaseUnit.construct：普通训练与购买参数</a>，以及 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L673">TileMap 的单位放置</a>。</li><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityTurnManager.kt#L23">城市开始时机</a>，以及 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L69">文明层的城市、单位处理顺序</a>。</li><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/uniques/GlobalUniquesTests.kt#L484">既有生产加成测试</a>，配合本课附带的验证用例。</li></ol>
+<p>下次学习前，用两分钟复述：12.4、47、7 分别属于哪个字段，在哪一步变化？再把第 14 课的粮食增长放到同一条时间线上，比较两种阈值检查的位置。约一周后重做练习 A，尤其检查是否把溢出提前加给 B。</p>
+<p>下一课「城市怎样进入文明账本」会把城市产出接到文明收支、国库与维护费。这里新建成的单位也会影响维护费，但本课先讲到它的生成与本方行动机会。遇到不清楚的分支，可以直接向教学助手提问，并附上方法名、输入数字和自己的推演。</p>
+<div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0014-population-growth.html">上一课：人口怎样工作和增长</a><a href="reference/architecture.html">架构速查</a><a href="0016-civilization-economy.html">下一课：城市怎样进入文明账本</a></div>
+</section>
+<footer>资料核对：2026-09-24。教材制作与验证不等于学习完成。普通生产的核心时序：结束时加进度，本方下回合开始时尝试完成；成功后封顶保存溢出，下次普通生产结算再使用。源码基线：1df6249a41301056ddc4448a95a93ddf5403e061。</footer>
+</main></div>
+</body>
+</html>

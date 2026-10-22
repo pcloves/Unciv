@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>05 · 六边形如何编号 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>05 / 六边形如何编号</strong><a href="#goal">目标、回顾与场景</a><a href="#axes">1. 两条斜轴：x 与 y</a><a href="#neighbors">2. 六个邻居：偏移量表</a><a href="#distance">3. 距离：两分支的立方公式</a><a href="#world">4. 像素与世界坐标</a><a href="#tests">5. 测试把编号钉住</a><a href="#redblob">6. 与 Red Blob 的约定差异</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第二、四课<br>含源码走读与手算练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第二阶段 / 地图专题</div>
+<h1>六边形如何编号</h1>
+<p class="lead">地图专题的第一课，回答一个最基础的问题：一块六边形地块，代码用什么数表示它在哪？Unciv 的答案是两个整数（x, y），配上一套“怎么找邻居、怎么算距离、怎么换成屏幕像素”的换算。这套编号是整个地图系统的地基——生成、寻路、显示、存档全都站在它上面。</p>
+<p class="meta">需要的基础：第二课的数据归属（坐标存哪里、存档怎么序列化）、第四课的 given/when/then 读测试法。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>先给一个场景：你在做一个六边形策略游戏的地图编辑器，点击屏幕上的某个位置，要把它变成画笔目标——也就是说，把“屏幕上的一个点”变回“某一块地块”。反过来，画大地图时你想知道两个出生点隔了几格，决定玩家开局会不会立刻接壤。这两个需求在 Unciv 里都由一个文件解决：<code>core/src/com/unciv/logic/map/HexMath.kt</code>，里面有坐标类型 <code>HexCoord</code> 和一套纯函数 <code>HexMath</code>。</p>
+<h3>先找回第四课的读法</h3>
+<p>第四课学了从断言倒着读源码：<strong>给定（given）→ 执行（when）→ 断言（then）</strong>，再把“预期值”和“产生它的生产代码”对上。本课就直接练手：<code>tests/src/com/unciv/logic/map/HexmathTests.kt</code> 里 8 条测试，全是关于编号、距离和存档格式的断言——读懂了它，你就知道这套坐标在作者眼里“必须长什么样”。</p>
+<div class="paired"><div><h3>本课的四个问题</h3><ul><li><strong>两个数怎么指位置：</strong>x 和 y 各指向哪个方向，为什么这么选？</li><li><strong>邻居怎么算：</strong>六个邻居对应的坐标偏移是什么，代码里由谁维护？</li><li><strong>距离怎么算：</strong>getDistance 的两分支公式为什么对？</li><li><strong>约定差在哪：</strong>这套编号和 Red Blob 教程里的轴向坐标有什么不同，移植公式要注意什么？</li></ul><p>读完还要会一件事：不看资料，<strong>手算</strong>任意一块地的邻居和两点距离。</p></div><div><h3>先认识三个概念</h3><ul><li><strong>轴向坐标（Axial）：</strong>只用两个整数表示六边形网格上的位置，例如 <code>(x, y)</code>。Unciv 的 HexCoord 就是轴向坐标。</li><li><strong>立方坐标（Cube）：</strong>用三个数 (a, b, c) 表示同一个位置，且 a+b+c 恒为 0。很多公式在立方坐标里最简洁，Unciv 在“取整”时也会临时用它。</li><li><strong>时钟方向（Clock Position）：</strong>用 12、2、4、6、8、10 点钟指六个邻居方向，例如 10 点钟就是左上。</li></ul><p class="source"><a href="reference/hexmath.html">地图与坐标速查</a><a href="../../core/src/com/unciv/logic/map/HexMath.kt">本地 HexMath.kt</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>两条斜轴与 HexCoord</td><td>12 分钟</td><td>画出 x/y 轴，给出任意格的坐标</td></tr><tr><td>六个邻居的偏移</td><td>10 分钟</td><td>背出偏移表，手算一块地的邻居</td></tr><tr><td>距离公式与像素换算</td><td>14 分钟</td><td>手算距离，说清屏幕坐标的正反换算</td></tr><tr><td>测试与 Red Blob 对照</td><td>14 分钟</td><td>读出测试三要素，指出两套约定的差异</td></tr></tbody></table>
+</section>
+
+<section id="axes"><h2>1. 两条斜轴：x 与 y 各指向哪里</h2>
+<p>先看坐标类型本身。它没有“东西南北”这类枚举，就是两个整数，配上加减乘等不可变运算：</p>
+<div class="paired"><div><pre><code><span class="comment">// core/src/com/unciv/logic/map/HexMath.kt 中的 HexCoord（部分代码）。</span>
+<span class="comment">// 保存一个六边形地块在 TileMap 上的位置。</span>
+data class HexCoord(val x: Int = 0, val y: Int = 0) {
+
+    @Pure fun plus(hexCoord: HexCoord): HexCoord =
+        HexCoord.of(x + hexCoord.x, y + hexCoord.y)
+    @Pure fun plus(plusX: Int, plusY: Int): HexCoord =
+        HexCoord.of(x + plusX, y + plusY)
+    @Pure fun minus(hexCoord: HexCoord): HexCoord =
+        HexCoord.of(x - hexCoord.x, y - hexCoord.y)
+    @Pure fun times(int: Int): HexCoord =
+        HexCoord.of(x * int, y * int)
+
+    companion object {
+        val Zero = HexCoord.of(0, 0)
+        @Pure fun of(x: Int, y: Int): HexCoord = HexCoord(x, y)
+        fun fromString(string: String): HexCoord { ... } <span class="comment">// 与 toPrettyString 相反</span>
+    }
+
+    <span class="comment">// 与 Vector2 存档格式 1:1 兼容的读写器，第 5 节细看</span>
+    class Serializer : Json.Serializer&lt;HexCoord&gt; { ... }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/HexMath.kt">本地 HexMath.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L391">HexCoord · L391</a></p></div><div><p>这就是第二课“城市存坐标而不是复制地块”的答案实体：<code>City.location</code>、<code>Tile.position</code> 都是 <code>HexCoord</code>，存档里写成 <code>{"x":3,"y":-2}</code> 这样的一对整数。运算全部返回新对象（<code>@Pure</code> 注解标注），坐标本身当作值来用。</p><p>所有运算都在两个整数上做，所以它非常便宜，可以放心当 <code>TileMap</code> 里密集矩阵 <code>tileMatrix[x - leftX][y - bottomY]</code> 的索引，也可以当 HashMap 的键。文件末尾还有一个打包进单个 Int 的 <code>InlineHexCoord</code>（x 存高 16 位、y 存低 16 位），但因为存档兼容的原因目前没有启用，先知道有这回事即可。</p></div></div>
+<h3>两个轴的方向，是作者留下的最重要注释</h3>
+<div class="paired"><div><pre><code><span class="comment">// HexMath.kt 里关于坐标方向的原注释。</span>
+<span class="comment">// HexCoordinates are a (x,y) vector, where x is the vector</span>
+<span class="comment">// getting us to the top-left hex (e.g. 10 o'clock)</span>
+<span class="comment">// and y is the vector getting us to the top-right hex (e.g. 2 o'clock)</span>
+<span class="comment">// Each (1,1) vector effectively brings us up a layer.</span>
+<span class="comment">// For example, to get to the cell above me, I'll use a (1,1) vector.</span>
+<span class="comment">// To get to the cell below the cell to my bottom-right,</span>
+<span class="comment">// I'll use a (-1,-2) vector.</span></code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L101">轴方向注释 · L101</a></p></div><div><p>x 轴指向<strong>左上</strong>的邻居（10 点钟），y 轴指向<strong>右上</strong>的邻居（2 点钟）。两条正向轴在画面上夹 120°；原教材写成 60° 有误。Unciv 的六边形是<strong>平顶</strong>摆放，正上、正下各有一个邻居，其余四个在斜向。</p><p>x、y 各加 1，左右分量抵消、向上分量相加，就到了正上方邻居 (1,1)。反方向 (−1,−1) 向下。原英文注释末尾将 (−1,−2) 描述为“右下邻居的下方”，与实际偏移表不符：(0,−1) 是左下邻居，再向下得到 (−1,−2)；右下邻居 (−1,0) 再向下应为 (−2,−1)。这里以偏移表和 hex2WorldCoords 为准。</p></div></div>
+<p>以 (0,0) 为中心，这六个邻居在屏幕上的样子：</p>
+<pre class="diagram"><code>                (1,1)       ← 12 点钟：正上方
+          (1,0)      (0,1)  ← 10 点钟（x 轴）/ 2 点钟（y 轴）
+                (0,0)       ← 自己
+          (0,-1)     (-1,0) ← 8 点钟 / 4 点钟
+                (-1,-1)     ← 6 点钟：正下方</code></pre>
+<p>下面选几行地块，按画面从左到右排列。每一行都有相同的 x+y：</p>
+<pre class="diagram"><code>  x+y= 2    (2,0)      (1,1)      (0,2)
+  x+y= 1        (1,0)      (0,1)
+  x+y= 0   (1,-1)      (0,0)      (-1,1)
+  x+y=-1        (0,-1)     (-1,0)
+  x+y=-2   (0,-2)     (-1,-1)     (-2,0)</code></pre>
+<p><strong>x+y 相同的地块中心排在一条水平线上，y−x 相同的地块中心排在一条竖直线上。</strong>源码的命名需要分清：<code>getLatitude = x+y</code>，<code>getLongitude = x−y</code>，<code>getColumn = y−x</code>。经度与列号互为相反数，都描述左右位置，正方向相反；原教材将 y−x 写成 getLongitude 有误。</p>
+<p>可以先把 x+y 当作高度量、y−x 当作向右增大的列号。x、y 本身是两个斜轴坐标，不能把 x 当作屏幕横轴。<a href="0006-tilemap.html#wrap-axes">第六课从两条斜轴的水平、竖直分量推导这两组和差</a>。</p>
+</section>
+
+<section id="neighbors"><h2>2. 六个邻居：一张偏移量表</h2>
+<p>邻居不是用一堆 if 写出来的，而是集中放在一张表里：几点钟方向的邻居对应哪个坐标偏移。先看这张表和配套的方向枚举：</p>
+<div class="paired"><div><pre><code><span class="comment">// HexMath.kt：把“几点钟方向的邻居”翻译成坐标偏移。</span>
+@Immutable
+private val clockPositionToHexcoordMap: Map&lt;Int, HexCoord&gt; = mapOf(
+    0 to HexCoord.of(1, 1),   <span class="comment">// 0 是 12 的别名，取模逻辑更简单</span>
+    12 to HexCoord.of(1, 1),
+    2 to HexCoord.of(0, 1),
+    4 to HexCoord.of(-1, 0),
+    6 to HexCoord.of(-1, -1),
+    8 to HexCoord.of(0, -1),
+    10 to HexCoord.of(1, 0)
+)
+
+<span class="comment">// NeighborDirection.kt：邻居方向枚举，每个方向绑定一个钟点。</span>
+enum class NeighborDirection(val clockPosition: Int) {
+    TopRight(2), BottomRight(4), Bottom(6),
+    BottomLeft(8), TopLeft(10), Top(12)
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L277">偏移量表 · L277</a><a href="../../core/src/com/unciv/logic/map/NeighborDirection.kt">本地 NeighborDirection.kt</a></p></div><div><p>表里 0 点钟和 12 点钟映射到同一个偏移 (1,1)，注释说这是为了让“对 12 取模”的钟点运算更简单：代码里按小时数循环方向时，拿到 0 和 12 都能命中正上方。</p><p>把表和第 1 节的图对照：12 点钟（正上）是 (1,1)，2 点钟（右上）是 (0,1)——只加 y 轴，10 点钟（左上）是 (1,0)——只加 x 轴。剩下的 4、6、8 点钟就是这三个偏移取负。六边形邻居的几何事实，落到坐标上就是这六个固定偏移。</p></div></div>
+<p>取邻居的代码就在 <code>TileMap</code> 里，逻辑只有两步——坐标加偏移，再查地图：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap.kt：按钟点取邻居（考虑环绕，返回 Tile 或 null）。</span>
+@Readonly
+fun getClockPositionNeighborTile(tile: Tile, clockPosition: Int): Tile? {
+    val difference = HexMath.getClockPositionToHexcoord(clockPosition)
+    if (difference == HexCoord.Zero) return null
+    val possibleNeighborPosition = tile.position.plus(difference)
+    return getIfTileExistsOrNull(possibleNeighborPosition.x,
+        possibleNeighborPosition.y)
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L443">getClockPositionNeighborTile · L443</a></p></div><div><p><code>getClockPositionToHexcoord</code> 就是查上面的表，查不到（钟点无效）返回 <code>HexCoord.Zero</code>，所以先判断零偏移再往下走，避免把“自己”当邻居返回。</p><p>“相邻 = 坐标加偏移”这一句就是六边形网格的全部拓扑。反向推导也成立：两格相减得到差，差落在六个偏移之一就说明相邻——<code>getNeighborTileClockPosition</code> 正是这样从坐标差反推钟点的（第 6 课的环绕边界还会用到它）。</p></div></div>
+<p>六个偏移整理成表，手算时照着加：</p>
+<table><thead><tr><th scope="col">钟点</th><th scope="col">方向</th><th scope="col">偏移 (dx, dy)</th><th scope="col">NeighborDirection</th></tr></thead><tbody>
+<tr><td>12（=0）</td><td>正上</td><td>(1, 1)</td><td><code>Top</code></td></tr>
+<tr><td>2</td><td>右上</td><td>(0, 1)</td><td><code>TopRight</code></td></tr>
+<tr><td>4</td><td>右下</td><td>(-1, 0)</td><td><code>BottomRight</code></td></tr>
+<tr><td>6</td><td>正下</td><td>(-1, -1)</td><td><code>Bottom</code></td></tr>
+<tr><td>8</td><td>左下</td><td>(0, -1)</td><td><code>BottomLeft</code></td></tr>
+<tr><td>10</td><td>左上</td><td>(1, 0)</td><td><code>TopLeft</code></td></tr>
+</tbody></table>
+<p>例：<strong>(2,3) 的六个邻居</strong>按上表逐个相加，是 (3,4)、(2,4)、(1,3)、(1,2)、(2,2)、(3,3)。不用画图、不用三角函数——编号的好处就在这里。</p>
+</section>
+
+<section id="distance"><h2>3. 距离：两分支公式背后的立方坐标</h2>
+<p>六边形的“格数距离”不是欧氏距离，而是<strong>最少跨几条边</strong>。看 getDistance 的实现，主体就一个两分支判断：</p>
+<div class="paired"><div><pre><code><span class="comment">// HexMath.kt：不带环绕的六边形距离（三个重载，核心是这个）。</span>
+@Pure
+fun getDistance(originX: Int, originY: Int,
+                destinationX: Int, destinationY: Int): Int {
+    val relativeX = originX - destinationX
+    val relativeY = originY - destinationY
+    return if (relativeX * relativeY &gt;= 0)
+        max(abs(relativeX), abs(relativeY))
+    else
+        (abs(relativeX) + abs(relativeY))
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L267">getDistance · L267</a></p></div><div><p>先算两个坐标差：relativeX、relativeY 分别是两格在 x 轴、y 轴上的差。<strong>同号</strong>（都非负或都非正）取两个绝对值中大的那个；<strong>异号</strong>取两个绝对值之和。为什么这样分？光看这四行很难直接想通——这正是“先读注释再读代码”没有覆盖的部分，注释里没有解释，需要借用仓库里的另一段代码。</p><p>答案在 <code>roundHexCoords</code> 内部的局部函数里：Unciv 自己写了六边形坐标 ↔ 立方坐标的换算。把 x、y 想象成三个立方分量中的两个，第三个由“三者之和为 0”补出来，距离公式就一目了然。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// roundHexCoords 里的局部函数（HexMath.kt，部分代码）。</span>
+<span class="comment">// 六边形坐标 → 立方坐标：第三个分量 = 前两个的负和。</span>
+@Readonly
+fun hex2CubicCoords(hexCoord: Vector2): Vector3 {
+    return Vector3(hexCoord.y - hexCoord.x, hexCoord.x, -hexCoord.y)
+}
+
+<span class="comment">// 立方坐标 → 六边形坐标：取第 2、3 个分量的相反数。</span>
+@Readonly
+fun cubic2HexCoords(cubicCoord: Vector3): Vector2 {
+    return Vector2(cubicCoord.y, -cubicCoord.z)
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L200">hex2CubicCoords · L200</a></p></div><div><p>立方坐标用三个数 (c1, c2, c3) 表示同一格，三个数之和恒为 0。Unciv 的取法是 <strong>(y−x, x, −y)</strong>：前两个就是熟悉的 y−x 和 x，第三个 −y 由和为零自动确定。</p><p>立方坐标的格数距离有个标准公式：三个分量各自的差取绝对值，再取最大。<strong>max(|Δc1|, |Δc2|, |Δc3|)</strong>。把 c1 = y−x、c2 = x、c3 = −y 代进去：Δc2 是 Δx，Δc3 是 −Δy，Δc1 是 Δy − Δx。于是距离 = max(|Δx|, |Δy|, |Δy − Δx|)——getDistance 的两分支，正是这个 max 的化简。</p></div></div>
+<p>化简分两种情况。Δx、Δy <strong>同号</strong>时，|Δy − Δx| 是“两个数的差”，不可能超过其中较大的那个，于是 max(|Δx|, |Δy|, |Δy−Δx|) = max(|Δx|, |Δy|)；<strong>异号</strong>时，|Δy − Δx| 变成“两个数的和”，一定最大，于是结果就是 |Δx| + |Δy|。代码里的两分支和立方公式是同一个数。</p>
+<p>手算两个例子：<strong>从 (2,3) 到 (5,0)</strong>，Δx = −3、Δy = +3，异号 → 距离 6；<strong>从 (2,3) 到 (4,4)</strong>，Δx = −2、Δy = −1，同号 → 距离 2。想验证，把第 1 节的平面图摊开数边数，两个答案都数得出来。</p>
+<aside class="callout tradeoff"><strong>设计取舍：为什么写两分支，不直接写立方公式</strong><p>两分支版本没有中间变量，最快；但它把“为什么对”藏了起来，所以作者在 <code>roundHexCoords</code> 的注释里留下了 <code>Todo: find a mathematically equivalent way to round hex coords without cubic magic</code>——立方坐标是“数学上直白”的工具，Unciv 只在需要取整这种难直接化简的地方用它，热路径（距离）则手写化简版。读源码时遇到这种“看不懂但很快”的代码，先去找它附近的立方/几何注释或测试，通常就能还原出意图。</p></aside>
+</section>
+
+<section id="world"><h2>4. 像素与世界坐标：编号怎样变成屏幕位置</h2>
+<p>逻辑坐标定好了，还要回答开头场景里的问题：这块地画在屏幕哪里？反过来，点击的像素属于哪块地？两个函数正好一正一反：</p>
+<div class="paired"><div><pre><code><span class="comment">// HexMath.kt：六边形坐标 → 世界坐标。</span>
+<span class="comment">// 两轴取 10 点钟、2 点钟方向，各乘自己的坐标值，再放大 √3。</span>
+@Pure
+fun hex2WorldCoords(hexCoord: HexCoord): Vector2 {
+    val xVector = getVectorByClockHour(10)
+    xVector.scl(sqrt(3.0).toFloat() * hexCoord.x)
+    val yVector = getVectorByClockHour(2)
+    yVector.scl(sqrt(3.0).toFloat() * hexCoord.y)
+    return xVector.add(yVector)
+}
+
+<span class="comment">// 钟点 → 方向向量：10 点钟 = 150°、2 点钟 = 30°。</span>
+@Pure
+private fun getVectorByClockHour(hour: Int): Vector2 {
+    return getVectorForAngle((2 * Math.PI * (hour / 12f)).toFloat())
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L127">hex2WorldCoords · L127</a></p></div><div><p>世界坐标 = √3 ×（x 倍的 10 点钟方向向量 + y 倍的 2 点钟方向向量）。展开为 <strong>worldX = 1.5·(y−x)，worldY = (√3/2)·(x+y)</strong>，其中 √3/2 约为 0.866。这是相邻中心距为 √3 的世界坐标；调用处再乘显示尺寸，例如 TileGroupMap 的 0.8 × groupSize。</p><p>y−x 是向右增大的列号 <code>getColumn</code>，x+y 是向上增大的纬度 <code>getLatitude</code>。源码经度 <code>getLongitude = x−y</code> 则向左增大，因此也可以写成 worldX = −1.5 × longitude、worldY = (√3/2) × latitude。核对见 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L51">经纬度函数 · L51</a> 和 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L156">getColumn · L156</a>。</p></div></div>
+<p>反向换算（点击 → 地块）是解一个 2×2 方程组，解出来的坐标通常是小数，还要舍入到最近的六边形：</p>
+<div class="paired"><div><pre><code><span class="comment">// HexMath.kt：世界坐标 → 六边形坐标（解方程组，结果可能是小数）。</span>
+@Readonly
+fun world2HexCoords(worldCoord: Vector2): Vector2 {
+    val D = getVectorByClockHour(10); D.scl(sqrt(3.0).toFloat())
+    val A = getVectorByClockHour(2);  A.scl(sqrt(3.0).toFloat())
+    val den = D.x * A.y - D.y * A.x
+    val x = (worldCoord.x * A.y - worldCoord.y * A.x) / den
+    val y = (worldCoord.y * D.x - worldCoord.x * D.y) / den
+    return Vector2(x, y)
+}
+
+<span class="comment">// 小数坐标 → 最近六边形：转立方坐标、四舍五入，</span>
+<span class="comment">// 误差最大的分量改成另两个分量的负和（保持三者和为 0）。</span>
+@Readonly
+fun roundHexCoords(hexCoord: Vector2): Vector2 { ... }</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L140">world2HexCoords · L140</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L177">roundHexCoords · L177</a></p></div><div><p>world2HexCoords 是标准克莱姆法则：两个轴向量构成 2×2 系数矩阵，行列式放分母，把世界坐标投影回 (x, y)。</p><p>roundHexCoords 就是第 3 节立方坐标的主场：三个分量分别四舍五入后，通常有一个分量“多出来”（和不再为 0），就找出舍入误差最大的那个分量，用另两个的负和覆盖它。这样点落在哪个六边形内就归哪个六边形，不会出现错进邻格的缝隙。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// 地图编辑器 EditorMapHolder.kt：把点击位置换回地块（部分代码）。</span>
+fun getClosestTileTo(stageCoords: Vector2): Tile? {
+    val positionalCoords = tileGroupMap.getPositionalVector(stageCoords)
+    val hexPosition = HexMath.world2HexCoords(positionalCoords)
+    val rounded = HexMath.roundHexCoords(hexPosition)
+    if (!tileMap.mapParameters.worldWrap)
+        return tileMap.getOrNull(rounded)
+    val wrapped = HexMath.getUnwrappedNearestTo(
+        rounded.toHexCoord(), HexCoord.Zero, tileMap.maxLongitude)
+    return tileMap.getOrNull(wrapped) ?: tileMap.getOrNull(rounded)
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/ui/screens/mapeditorscreen/EditorMapHolder.kt">本地 EditorMapHolder.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/mapeditorscreen/EditorMapHolder.kt#L238">getClosestTileTo · L238</a></p></div><div><p>这就是开头“点击变地块”的完整链路：舞台坐标 → 地图的定位向量 → world2HexCoords → roundHexCoords → 按坐标查地块。三步一查，没有遍历。</p><p>环绕地图要多一步 <code>getUnwrappedNearestTo</code>：把落在“世界尽头”的点击折回到最近的地块坐标（按经度取模），这一步属于第 6 课的环绕边界，这里只需知道“点击链路到此为止”。</p></div></div>
+</section>
+
+<section id="tests"><h2>5. 测试把编号钉住</h2>
+<p>第四课说过，测试是“可执行说明书”。HexmathTests 的 8 条测试恰好覆盖本课三个主题：编号、距离、存档格式。先看编号与环：</p>
+<div class="paired"><div><pre><code><span class="comment">// HexmathTests.kt：中心格编号必须为 0。</span>
+@Test
+fun zeroIndexed() {
+    Assert.assertEquals(0, HexMath.getZeroBasedIndex(0,0))
+}
+
+<span class="comment">// 第 1～100 环：每格都映射到自己的环号段内，且互不重复。</span>
+@Test
+fun testMappingIsOneToOne() {
+    val seenCoordsMapping = hashSetOf&lt;Int&gt;()
+    for (ring in 1..100) {
+        val coords = HexMath.getHexCoordsAtDistance(HexCoord.Zero, ring, 100, false)
+        val ringStartCoordinate = 1 + 6 * ring * (ring - 1) / 2
+        for (coord in coords) {
+            val mapping = HexMath.getZeroBasedIndex(coord.x.toInt(), coord.y.toInt())
+            Assert.assertFalse("Duplicate coords found: $coord", seenCoordsMapping.contains(mapping))
+            Assert.assertTrue("Coords $coord should be in ring $ring, actual mapping $mapping",
+                mapping in ringStartCoordinate .. (ringStartCoordinate + 6 * ring - 1))
+            seenCoordsMapping.add(mapping)
+        }
+    }
+}</code></pre><p class="source"><a href="../../tests/src/com/unciv/logic/map/HexmathTests.kt">本地 HexmathTests.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/HexmathTests.kt#L16">zeroIndexed · L16</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/HexmathTests.kt#L22">testMappingIsOneToOne · L22</a></p></div><div><p>第一条的 given 是“中心格 (0,0)”，断言它的连续编号是 0。第二条把整个坐标系扫了一遍：given 是第 1～100 环的全部坐标；then 有两个断言——编号落在本环的号段 <code>[ringStart, ringStart + 6·ring − 1]</code> 内，且与已见过的编号都不重复（否则报 “Duplicate coords found”）。</p><p><code>1 + 6·ring·(ring−1)/2</code> 是环起点的公式：第 0 环只有 1 格，第 1 环有 6 格，第 2 环 12 格……累加后就是它。同文件里的 <code>getNumberOfTilesInHexagon(size) = 1 + 6·size·(size+1)/2</code> 是同一串数——六边形地图按“环”数格子，第 1 环编号 1～6，第 2 环 7～18，依次类推。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// HexMath.kt：连续编号的“教学版”实现（部分代码）。</span>
+<span class="comment">// 逻辑等价、通过同样的测试，但慢约 5 倍。</span>
+fun mapRelativePositionToPositiveIntRedblob(x: Int, y: Int): Int {
+    if (x == 0 &amp;&amp; y == 0) return 0
+    val ring = getDistance(0, 0, x, y)
+    val ringStart = 1 + 6 * ring * (ring - 1) / 2
+    val vectorsInRing = getHexCoordsAtDistance(HexCoord.Zero, ring, ring, false)
+    val positionInRing = vectorsInRing.indexOf(HexCoord.of(x, y))
+    return ringStart + positionInRing
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L363">教学版实现 · L363</a></p></div><div><p>连续编号 = <strong>环起点 + 环内序号</strong>。环号用第 3 节的距离求，环内序号 = 自己在“环坐标列表”里的下标；这个列表由 <code>getHexCoordsAtDistance</code> 生成——它沿钟面走三条边、用“原点两倍减自己”镜像出对面三个方向（细节留给第 11 课的寻路与范围）。</p><p>生产用的 <code>getZeroBasedIndex</code> 不走这个列表，而是用一个 when 分支直接推环内序号（省下遍历，注释说快约 5 倍），测试保证两者同一。这份“简单版 + 快速版 + 同测试”的布局值得模仿：先用笨办法把语义写明白，再优化。</p></div></div>
+<p>存档格式也钉在测试里。第二课讲过序列化：存档只写 ID、坐标、数值。坐标这块有三条测试：</p>
+<div class="paired"><div><pre><code><span class="comment">// HexmathTests.kt：三种存档格式的断言（各取核心行）。</span>
+<span class="comment">// 1) HexCoord 与 Vector2 的 JSON 要能互相读回</span>
+@Test
+fun testHexCoordVector2SerDeser() {
+    for (x in -2..2) for (y in -2..2) {
+        val hexCoordSerialized = json.toJson(HexCoord(x, y))
+        val vector2Deserialized = json.fromJson(Vector2::class.java, hexCoordSerialized)
+        Assert.assertEquals(Vector2(x.toFloat(), y.toFloat()), vector2Deserialized)
+        val vector2Serialized = json.toJson(Vector2(x.toFloat(), y.toFloat()))
+        val hexCoordDeserialized = json.fromJson(HexCoord::class.java, vector2Serialized)
+        Assert.assertEquals(HexCoord(x, y), hexCoordDeserialized)
+    }
+}
+
+<span class="comment">// 2) 零值省略：(-42, 42) 序列化成 {"x":-42,"y":42}</span>
+@Test fun testSerializedHexCoordIsCompact() { ... }
+
+<span class="comment">// 3) 旧存档里的 Vector2 浮点包装格式也要能读回</span>
+@Test
+fun testCanDeserializeVerboseVector2Format() {
+    val input = """{"x": {"class": "java.lang.Float", "value": 23},
+                    "y": {"class": "java.lang.Float", "value": -23}}"""
+    val actual = json.fromJson(HexCoord::class.java, input)
+    Assert.assertEquals(HexCoord.of(23, -23), actual)
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/HexmathTests.kt#L67">testHexCoordVector2SerDeser · L67</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/HexmathTests.kt#L97">compact · L97</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/HexmathTests.kt#L89">verbose · L89</a></p></div><div><p>第 1 条：given 是 −2..2 范围内的 25 组坐标；when 是“HexCoord 写 → Vector2 读”和反方向各走一遍；then 是两个对象相等。它保证存档里坐标的写法与 Vector2 完全互换——历史上坐标曾是 Vector2，后来换成了 HexCoord，老档必须无缝衔接。</p><p>第 2、3 条把具体格式钉死：写的时候 x、y 为 0 就省略（紧凑格式），读的时候则按 <code>Float::class.java</code> 读、默认 0——这是 <code>HexCoord.Serializer</code> 里的对应实现。第 3 条是历史包袱的回归保护：极老的存档把数值包成 <code>{"class":..., "value":23}</code>，读档也要认出它。这正是第四课“读档测试守护向后兼容”在坐标上的实例。</p></div></div>
+<aside class="callout"><strong>本机核验：8 条测试全绿</strong><p>本次课程核对用 Gradle MCP 实际重跑过：<code>HexmathTests</code> 8 过、0 跳过、0 失败。你本地可以跑 <code>:tests:test --tests "com.unciv.logic.map.HexmathTests"</code>（Gradle），几十秒见绿条。跑一次的意义不在“测试是别人写的”，而在确认<strong>你手上的源码和课程讲的是同一份</strong>——这就是第四课说的可运行环境核验。</p></aside>
+</section>
+
+<section id="redblob"><h2>6. 与 Red Blob 教程的约定差异</h2>
+<p>六边形算法的经典资料是 Red Blob Games 的《Hexagonal Grids》交互教程（课程 <a href="RESOURCES.md">RESOURCES.md</a> 已收录）。它和 Unciv 用的是同一套数学，但坐标轴的选取不一样。差异不在“谁对谁错”，而在<strong>屏幕方向和轴的选择</strong>，照抄公式会得到镜像或旋转过的结果。</p>
+<table><thead><tr><th scope="col">方面</th><th scope="col">Unciv 的约定</th><th scope="col">Red Blob 轴向坐标的约定</th></tr></thead><tbody>
+<tr><td>六边形摆放</td><td>平顶：正上、正下各有一个邻居</td><td>教程按需介绍平顶/尖顶，公式各自成系</td></tr>
+<tr><td>屏幕 y 轴</td><td>向上（libGDX 场景坐标）</td><td>示意图里 y 轴向下</td></tr>
+<tr><td>坐标轴</td><td>两条斜轴：10 点钟（左上）与 2 点钟（右上），没有水平轴</td><td>轴向 (q, r)：一条水平轴加一条斜轴</td></tr>
+<tr><td>“正上方”一步</td><td>(1, 1)</td><td>依变体不同，通常没有“正上方”一步</td></tr>
+<tr><td>距离公式</td><td>max(|Δx|, |Δy|, |Δ(y−x)|) 的两分支写法</td><td>max(|Δq|, |Δr|, |Δq+Δr|)，同一个立方公式</td></tr>
+</tbody></table>
+<p>两条距离公式是同一个数：它们都是立方坐标里 max(|Δc1|, |Δc2|, |Δc3|) 的改写，只是轴不同、变量名不同。Unciv 丢掉了水平轴、保留两条斜轴，因为它的屏幕布局正是按两条斜轴展开的（第 4 节：screenX ∝ y−x、screenY ∝ x+y）；Red Blob 保留水平轴是为了教学直观。</p>
+<div class="paired"><div><h3>移植 Red Blob 算法时的核对顺序</h3><ol><li><strong>先对齐邻居</strong>：把对方的邻居偏移表画出来，和本课的六偏移表对照，必要时旋转/镜像；</li><li><strong>再核对距离</strong>：用第 3 节的手算例（(2,3)→(5,0) 得 6）验证公式是否等价；</li><li><strong>最后移植其余</strong>：范围、寻路、旋转等公式都在“邻居+距离”正确的前提下才有意义；</li><li><strong>以仓库为准</strong>：Unciv 的立方换算在 <code>hex2CubicCoords</code>（(y−x, x, −y)），有疑问时它和 HexmathTests 是最终依据。</li></ol></div><div><h3>为什么这种差异很常见</h3><p>六边形坐标有轴向、立方、偏移三大族，乘上尖顶/平顶、屏幕 y 方向，能组合出十几种“看似相同”的约定。每套约定的公式都自洽，但跨约定搬运时必须显式转换——<strong>不能靠把 q 改名成 x、r 改名成 y 来“适配”</strong>。</p><p>Unciv 用两条斜轴表示地块，纬度取 x+y、经度取 x−y、列号取 y−x。读其他六边形代码时，也要先确定格子摆放方式、画面坐标正方向、保留的两条坐标轴，以及第三个立方分量的计算方法。</p></div></div>
+<aside class="callout"><strong>Godot 对照：画得出格子，但逻辑还得自己写</strong><p>Godot 4 的 TileSet 自带六边形 tile_shape 和偏移轴设置，能直接画出六边形网格，<code>world_to_map</code> 也替你把像素换回格子坐标——对应本课的 hex2WorldCoords / world2HexCoords。但“哪一格是邻居”“两格隔几格”这类逻辑 Godot 不提供，正是 HexMath 干的活。照搬 Unciv 的分层即可：逻辑层用你选的轴向坐标 + 一张邻居偏移表（C# 里 <code>Vector2I</code> 当 Dictionary 键最顺手），渲染层交给 TileMapLayer。坐标约定只要和本课一样自洽并有测试钉住，用哪种轴都可以。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>一块地 = 一对整数 (x, y)：x 指左上（10 点钟）、y 指右上（2 点钟），屏幕 y 向上，正上方邻居是 (1,1)。</strong></li><li><strong>相邻 = 坐标加偏移；六个邻居的偏移是 ±(1,0)、±(0,1)、(1,1)、(−1,−1)，集中在一张钟点表里。</strong></li><li><strong>距离不看直线：同号取 max、异号相加——它是立方坐标距离 max(|Δx|, |Δy|, |Δ(y−x)|) 的化简。</strong></li><li><strong>世界坐标 worldX = 1.5(y−x)、worldY = (√3/2)(x+y)：列号 y−x 向右增大、纬度 x+y 向上增大；源码经度 x−y 与列号符号相反。</strong></li><li><strong>点击反查 = world2HexCoords 解方程 + roundHexCoords 立方舍入 + 查地块，无需遍历。</strong></li><li><strong>HexmathTests 覆盖编号与坐标存档格式等行为；引用某条测试时，需看它具体断言了什么。</strong></li><li><strong>不同轴向坐标约定之间要显式转换，不能换变量名照抄公式。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；不看资料手算出邻居、距离和换算，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="a"><fieldset><legend>1. 从 (0,0) 出发，哪一个是正上方邻居的偏移？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="x、y 各加 1 就是上一层，正上方（12 点钟）在钟点表里映射到 (1,1)。"><span>(1,1)</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="(0,1) 只加 y 轴，是 2 点钟的右上邻居，不是正上。"><span>(0,1)</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="(1,0) 只加 x 轴，是 10 点钟的左上邻居，不是正上。"><span>(1,0)</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="(2,0) 沿 x 轴走了两步，跨过一格；邻居偏移都只是一步。"><span>(2,0)</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>2. getDistance 算 (0,0) 到 (2,-4) 得多少？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="2 只是 x 方向上的差，距离还要看 y 方向的差怎么参与。"><span>2</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="4 是 max(2,4)，只在两差同号时成立；这里异号要相加。"><span>4</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="Δx=-2、Δy=4 异号，距离 = |-2|+|4| = 6，与立方公式 max(2,4,6) 一致。"><span>6</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="8 不是任何分支的结果；异号分支是绝对值相加，不是 2×4。"><span>8</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>3. hex2WorldCoords 用哪两个钟点方向做基向量？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="x 轴取 10 点钟、y 轴取 2 点钟，与坐标轴方向一致。"><span>十点钟与两点钟</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="6 点钟是正下方邻居，不是坐标轴；两轴是左上与右上。"><span>六点钟与两点钟</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="4 点钟是右下邻居，不是坐标轴；两个轴都是“上”邻方向。"><span>十点钟与四点钟</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="12 点钟是 (1,1) 的组合结果，不是单独一条坐标轴。"><span>十二点与十点钟</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. Red Blob 轴向坐标的两条轴是什么？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="Red Blob 保留水平 q 轴与斜向 r 轴；Unciv 则保留两条斜轴（10、2 点钟）。"><span>一条水平轴与一条斜轴</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="两轴若平行就无法唯一表示平面上的位置；轴向坐标的两条轴不平行。"><span>两条互相平行的斜向轴</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="六边形轴向坐标的两条轴夹 60°，不是正交的直角坐标。"><span>两条正交的水平竖直轴</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="轴向坐标只用两个数，第三个分量由和为 0 补出，不写进坐标。"><span>旋转后的三条对角线轴</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：正上方是 (1,1)；2：距离 6；3：十点钟与两点钟；4：一条水平轴与一条斜轴。分别对应 <a href="#axes">两条斜轴</a>、<a href="#distance">距离公式</a>、<a href="#world">像素与世界坐标</a>、<a href="#redblob">Red Blob 对照</a>。</p></details>
+<h3>练习 A · 手算邻居与距离（5 分钟）</h3><p>不看偏移表：写出 <strong>(2,3) 的六个邻居</strong>；再算 <strong>getDistance((2,3), (5,0))</strong> 和 <strong>getDistance((2,3), (4,4))</strong>，并各说一句“为什么用这个分支”。</p><details class="rubric"><summary>展开核对要点</summary><p>邻居：加 (1,1)、(0,1)、(−1,0)、(−1,−1)、(0,−1)、(1,0)，得 (3,4)、(2,4)、(1,3)、(1,2)、(2,2)、(3,3)。距离：到 (5,0)，Δx=−3、Δy=+3，异号 → 3+3=6；到 (4,4)，Δx=−2、Δy=−1，同号 → max(2,1)=2。核对时还可以用立方公式验算：6 的 Δ(y−x)=6，2 的 Δ(y−x)=1，max 都与分支结果一致。</p></details>
+<h3>练习 B · 画出 x/y 轴（4 分钟）</h3><p>在白纸上以 (0,0) 为中心画出六个邻居（平顶摆放），标出每格的坐标，再用箭头画出 x 轴（10 点钟）和 y 轴（2 点钟），最后标出正上方的 (1,1)。</p><details class="rubric"><summary>展开核对要点</summary><p>中心 (0,0)；左上 (1,0)、右上 (0,1)、正上 (1,1)、右下 (−1,0)、左下 (0,−1)、正下 (−1,−1)。x 轴箭头从 (0,0) 指到 (1,0)，y 轴箭头指到 (0,1)；两箭头夹 120°，且都不水平。画完对照第 1 节的平面图检查。</p></details>
+<h3>练习 C · 用三要素读一条测试（4 分钟）</h3><p>对 <code>testHexCoordVector2SerDeser</code> 写出 given、when、then，并指出它钉住的生产代码关键断点（提示：在 <code>HexCoord.Serializer</code> 里）。</p><details class="rubric"><summary>展开核对要点</summary><p>given：−2..2 内 25 组 (x,y)。when：HexCoord 序列化后按 Vector2 反序列化，再反向各一次。then：两个对象分别等于原 Vector2 / 原 HexCoord。关键断点是 <code>Serializer.write</code> 里 <code>if (coord.x != 0) json.writeValue("x", coord.x)</code>（零值省略）与 <code>read</code> 里 <code>json.readValue("x", Float::class.java, 0f, jsonData)</code>（按 Float 读、默认 0，兼容老格式）。改其中任何一行，第 2、3 条格式测试就会变红。</p></details>
+<h3>练习 D · 本地跑通核验（5～10 分钟）</h3><p>跑 <code>:tests:test --tests "com.unciv.logic.map.HexmathTests"</code>（Gradle）。记录：跑了几题、过几题、有无跳过。</p><details class="rubric"><summary>展开核对要点</summary><p>正常结果是 8 题全过、0 跳过、0 失败（本次课程核对用 Gradle MCP 实测就是这个结果）。这一课不用 TestGame 造对局——HexmathTests 只依赖坐标运算，是“环境是否就绪”最便宜的检查；跑通后你手上的 HexMath.kt 与课程所讲就是同一份。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/HexMath.kt">HexMath.kt</a> 全文（约 480 行，重点在 HexCoord、轴方向注释、getDistance、hex2WorldCoords 与 roundHexCoords），再对照 <a href="../../tests/src/com/unciv/logic/map/HexmathTests.kt">HexmathTests.kt</a> 读一遍。想拓宽视野再读 <a href="https://www.redblobgames.com/grids/hexagons/">Red Blob Games: Hexagonal Grids</a>，注意第 6 节的适配提醒。速查表见 <a href="reference/hexmath.html">地图与坐标速查</a>。</p><p>下次学习前，用两分钟默写：六个邻居偏移、距离两分支、screenX/screenY 两个公式；约一周后再做练习 A 和 B。如果默写时记不清“同号取 max 还是异号取 max”，回头用练习 A 的两个例子各推一遍，别直接背结论。</p><p>有不清楚的步骤，可以直接问教学助手。说说你手算了哪个例子、哪里对不上，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="0006-tilemap.html">下一课：地块怎样组成地图（地图专题）</a></div></section>
+<footer>资料核对：2026-09-10。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。</footer>
+</main></div>
+</body>
+</html>

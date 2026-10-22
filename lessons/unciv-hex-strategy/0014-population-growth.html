@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>14 · 人口怎样工作和增长 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>14 / 人口怎样工作和增长</strong><a href="#goal">目标、回顾与场景</a><a href="#ownership">1. 所有权和人口分配不是一回事</a><a href="#assign">2. 人口怎样找到工作</a><a href="#food">3. 粮食结余从哪里来</a><a href="#growth">4. 存粮怎样换成人口</a><a href="#reassign">5. 增长后为什么要重新分配</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第 13 课<br>含源码走读与手算<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第三阶段 / 经济专题 · 人口专题</div>
+<h1>人口怎样工作和增长</h1>
+<p class="lead">第 13 课已经把每块地的产出算成结算单。这一课追问下一步：<strong>哪些地块真的把粮食送进城市？城市扣掉人口消耗后还剩多少？存粮怎样在回合结束时变成人口？</strong>答案分在三个对象里：<code>City</code> 保存领土与人口工作的地块，<code>CityStats</code> 算当前净粮食，<code>CityPopulationManager</code> 管存粮、增长和自动安排人口。</p>
+<p class="meta">需要的基础：第 13 课的地块结算单、<code>statsFromTiles</code> 与 <code>currentCityStats</code>；第 06 课的地块状态；第 04 课的测试证据方法。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>谁在工作：</strong>城市拥有的地、可以工作的地、人口实际工作的地分别由什么表示？</li><li><strong>剩多少粮：</strong><code>City.foodForNextTurn()</code> 为什么不是简单地把所有地块粮食相加？</li><li><strong>何时增长：</strong>存粮达到多少才长人口，增长后又怎样给新人口安排工作？</li></ul><p>读完要能手算下面这个人口 1 的小城市：两块实际进账的地给 5 粮，人口吃掉 2 粮，本回合净增 3 粮；存粮从 12 到 15 时长到人口 2。</p></div><div><h3>口述回顾：第 13 课</h3><ol><li>第 13 课：一块普通地要满足什么条件，才会进入 <code>CityStats.updateTileStats</code>？</li><li>城中心为什么可以不分配人口就进账？</li><li><code>statsFromTiles</code> 和 <code>currentCityStats</code> 分别处在结算链的哪一层？</li></ol><p>本课会把“有一块地的产出”接到“人口能否工作”和“城市粮食结余”上。</p><p class="source"><a href="0013-tile-yields.html">第 13 课：一块地怎样变成产出</a><a href="0013-tile-yields.html#city">回看工作格三条件</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody>
+<tr><td>所有权与人口分配</td><td>10 分钟</td><td><code>owningCity</code> 与 <code>workedTiles</code> 的边界</td></tr>
+<tr><td>人口分配</td><td>10 分钟</td><td><code>getFreePopulation</code> 和自动安排人口候选链</td></tr>
+<tr><td>粮食结余</td><td>10 分钟</td><td>地块粮食、人口消耗与最终净值</td></tr>
+<tr><td>增长回合</td><td>12 分钟</td><td><code>nextTurn</code> 的存粮、增长和重新分配人口</td></tr>
+</tbody></table></section>
+
+<section id="ownership"><h2>1. 所有权和人口分配不是一回事</h2>
+<p>先把三种“地”分开。城市扩张时，地块被城市拿到手；人口分配时，城市从自己的候选地里挑几块工作；城市统计时，只有符合条件的地块才进入收入。三个动作经常连续发生，所以很容易在脑中合成一个“城市有地就有产出”的错误规则。</p>
+<div class="paired"><div><pre><code><span class="comment">// City.kt。问：这三个集合分别回答什么问题？</span>
+var tiles = HashSet&lt;HexCoord&gt;()                 <span class="comment">// ① 城市保存的领土坐标</span>
+var workedTiles = HashSet&lt;HexCoord&gt;()           <span class="comment">// ② 人口实际工作的坐标</span>
+var lockedTiles = HashSet&lt;HexCoord&gt;()           <span class="comment">// ③ 自动分配时不挪走的地块</span>
+
+fun getWorkableTiles() = tilesInRange.asSequence()
+    .filter { it.getOwner() == civ }             <span class="comment">// ④ 领土 + 工作范围的候选</span>
+fun getWorkedTiles(): Sequence&lt;Tile&gt; =
+    workedTiles.asSequence().map { tileMap[it] } <span class="comment">// ⑤ 坐标查回 Tile</span>
+fun isWorked(tile: Tile) = workedTiles.contains(tile.position) <span class="comment">// ⑥ 是否有人在这里工作</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/City.kt">本地 City.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L102">字段与查询 · L102</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L211">工作查询 · L211</a></p></div><div><p>脑内模型是<strong>领土、工作地点、锁定地点</strong>：<code>tiles</code> 是城市控制的地块，<code>workedTiles</code> 是今天确实有人工作的地块，<code>lockedTiles</code> 是自动重新分配时不能挪动的地块。</p><p>① <code>tiles</code> 保存的是坐标集合，表示城市控制哪些地块；它不等于这些地块今天都产出。</p><p>② <code>workedTiles</code> 也是坐标集合，但含义变成“人口实际在哪些地块工作”。普通地块只有进入这里，才有机会进入城市的地块收入。</p><p>③ 锁定只影响自动重新分配，不是第三种领土。它让玩家手动指定的工作不被自动安排随意改掉。</p><p>④ <code>getWorkableTiles()</code> 先从城市工作范围取地，再要求 <code>getOwner() == civ</code>。因此别的城市拥有的地，即使在几何范围内，也不是本城候选。</p><p>⑤⑥ 集合存坐标，查询时再通过 <code>tileMap</code> 找回实际 <code>Tile</code>；<code>isWorked</code> 只是检查这块地的坐标是否在集合里。</p></div></div>
+<p>所有权由扩张管理器修改，人口工作的地块由 <code>City.workTile</code> 记录。它们是两条不同的状态变化路径：</p>
+<div class="paired"><div><pre><code><span class="comment">// CityExpansionManager.takeOwnership 与 City.workTile（部分代码）。</span>
+city.tiles = city.tiles.withItem(tile.position)    <span class="comment">// ① 加入城市领土</span>
+tile.setOwningCity(city)                            <span class="comment">// ② 地块记录 owningCity</span>
+city.population.autoAssignPopulation()             <span class="comment">// ③ 领土变化后尝试安排人口</span>
+
+fun workTile(tile: Tile): Boolean {
+    require(getWorkableTiles().contains(tile))      <span class="comment">// ④ 只能安排到本城可工作地</span>
+    if (isWorked(tile)) return false
+    workedTiles = workedTiles.withItem(tile.position) <span class="comment">// ⑤ 加入工作地块集合</span>
+    return true
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityExpansionManager.kt">本地 CityExpansionManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityExpansionManager.kt#L178">takeOwnership · L178</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L387">workTile · L387</a></p></div><div><p>①② 扩张先改两处所有权状态：城市的 <code>tiles</code> 加坐标，地块的 <code>owningCity</code> 指回城市。</p><p>③ 所有权变化后会尝试自动安排人口，但这是后续动作，不是所有权本身变成了人口工作状态。</p><p>④ <code>workTile</code> 先用 <code>getWorkableTiles</code> 做合法性检查；仅仅把坐标放进集合而绕过这个入口，会制造不合法状态。</p><p>⑤ 真正记录人口工作地点时，只把坐标放进 <code>workedTiles</code>。对照前一个代码块：这里没有再写 <code>owningCity</code>。</p><p>所以，一块已经归本城所有但暂时没人工作的普通农田，可以存在于 <code>tiles</code>，却不在 <code>workedTiles</code>；它的结算单有产出，但本回合不会进入本城的 <code>statsFromTiles</code>。</p></div></div>
+</section>
+
+<section id="assign"><h2>2. 人口怎样找到工作</h2>
+<p>人口管理器先算出“还有几个人没有安排工作”，再为每个自由人口比较地块和专家。这里先只看地块；专家是另一条分配分支。</p>
+<div class="paired"><div><pre><code><span class="comment">// CityPopulationManager。问：一个人口是否空闲？</span>
+fun getFreePopulation(): Int {
+    val workingPopulation = city.getWorkedTiles().count() <span class="comment">// ① 普通工作人口</span>
+    return population - workingPopulation -
+        getNumberOfSpecialists()                        <span class="comment">// ② 再扣专家</span>
+}
+
+// autoAssignPopulation（部分代码）
+val tilesToEvaluate = city.getWorkableTiles()
+    .filterNot { it.isBlockaded() }.toList().asSequence() <span class="comment">// ③ 候选地</span>
+val tileStats = tilesToEvaluate
+    .filterNot { it.providesYield() }
+    .associateWith { it.stats.getTileStats(city, city.civ) } <span class="comment">// ④ 先算格产出</span>
+repeat(freePopulation) { ... }                        <span class="comment">// ⑤ 给每个自由人口安排一次</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityPopulationManager.kt">本地 CityPopulationManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityPopulationManager.kt#L45">getFreePopulation · L45</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityPopulationManager.kt#L169">自动安排人口候选 · L169</a></p></div><div><p>脑内模型是<strong>先数空闲人口，再安排工作</strong>：城市人口是总人数，<code>workedTiles</code> 和专家岗位是已经安排好的工作，剩下的才是自由人口。</p><p>① <code>getWorkedTiles().count()</code> 数的是有人工作的普通地块；它不是城市所有地的数量。</p><p>② 专家不在 <code>workedTiles</code>，所以必须从人口总数中单独扣掉。这样一个人口不会同时被算成地块工人和专家。</p><p>③ 候选来自本城可以工作的地块，并排除被封锁的地块；所有权和封锁都是安排人口前的条件。</p><p>④ 对候选地块先取第 13 课的结算单合计。这里没有重新写一套产出公式。</p><p>⑤ <code>repeat(freePopulation)</code> 表示每个自由人口都有一次选择机会；前一个人口安排好之后，后面的比较结果可能随之变化。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// autoAssignPopulation 的选择部分（省略评分细节）。</span>
+val bestTileAndRank = tilesToEvaluate
+    .filterNot { it.providesYield() }                    <span class="comment">// ① 排除已经自行产出的地</span>
+    .associateWith { Automation.rankStatsForCityWork(
+        tileStats[it]!!, city, false) }                  <span class="comment">// ② 按城市需要评分</span>
+    .maxWithOrNull(compareBy({ it.value },
+        { it.key.longitude }, { it.key.latitude }))      <span class="comment">// ③ 选评分最高的地</span>
+val bestTile = bestTileAndRank?.key
+if (valueBestTile > valueBestSpecialist) {
+    if (bestTile != null) {
+        city.workTile(bestTile)                           <span class="comment">// ④ 记录人口工作的地</span>
+        cityStats.food += tileStats[bestTile]!!.food      <span class="comment">// ⑤ 同步本轮比较用粮</span>
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityPopulationManager.kt">本地 CityPopulationManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityPopulationManager.kt#L179">地块评分与人口安排 · L179</a></p></div><div><p>① 这里排除的是 <code>providesYield()</code> 的地：城中心或免人口产出地已经由城市统计规则处理，不要再让普通人口占用一个工作地。</p><p>② 评分函数接收地块的 <code>Stats</code>，还接收城市，因此城市焦点、当前需要等因素可以影响哪块地更合适。本课不把它简化成永远优先粮食。</p><p>③ 用分数和坐标作为稳定的比较顺序，选出当前评分最高的地块。</p><p>④ 只有调用 <code>city.workTile</code> 后，才会把这块地记录为人口工作的地。</p><p>⑤ 这行是自动安排过程中供下一次比较使用的粮食更新；完整城市最终值仍要回到 <code>city.cityStats.update()</code>。</p></div></div>
+</section>
+
+<section id="food"><h2>3. 粮食结余从哪里来</h2>
+<p>下面这个城市沿用第 13 课的结算单：城中心草地给 2 粮；草地上的农场有人工作，给 3 粮。城市先把符合条件的地块相加到 <code>statsFromTiles</code>，然后在最终城市统计中扣除人口消耗。<code>foodForNextTurn()</code> 读取的是这个最终净值。</p>
+<div class="paired"><div><pre><code><span class="comment">// CityStats.updateTileStats。问：哪些地块能进入城市地块收入？</span>
+val workedTiles = city.tilesInRange.asSequence()
+    .filter {
+        city.location.toHexCoord() == it.position        <span class="comment">// ① 城中心免费</span>
+        || city.isWorked(it)                             <span class="comment">// ② 人口安排</span>
+        || it.owningCity == city &amp;&amp; (...                <span class="comment">// ③ 免人口产出格</span>
+            it.getUnpillagedTileImprovement()
+                ?.hasUnique(TileProvidesYieldWithoutPopulation, ...)
+            || it.terrainHasUnique(TileProvidesYieldWithoutPopulation, ...))
+    }
+for (tile in workedTiles) {
+    val tileStats = tile.stats.getTileStats(city, city.civ) <span class="comment">// ④ 取第13课结算单</span>
+    stats.add(tileStats)                                  <span class="comment">// ⑤ 累加</span>
+}
+statsFromTiles = stats                                    <span class="comment">// ⑥ 钉住地块收入</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/CityStats.kt">本地 CityStats.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L349">updateTileStats · L349</a></p></div><div><p>脑内模型是<strong>今天的城市收入单</strong>：城中心不用人口也进账，人口工作的地块进账，免人口产出的特殊地也进账；领土里其它普通地先不算。</p><p>① 城中心不占用人口，无论其它人口安排在哪里，都进入城市地块收入。</p><p>② 普通地块必须通过 <code>city.isWorked(it)</code>，所以“归属本城”还不够。</p><p>③ 免人口产出是例外：格子归本城且改良或地形带有对应 unique，就可以不占人口仍进账。</p><p>④ 每个入选地块调用第 13 课的 <code>getTileStats</code>，人口系统不复制一份地块产出公式。</p><p>⑤⑥ 所有入选格连续相加，结果存进 <code>statsFromTiles</code>。这就是人口分配连接经济结算的接口。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// CityStats.update、updateFinalStatList 与 City.foodForNextTurn（部分）。</span>
+if (updateTileStats) updateTileStats()                  <span class="comment">// ① 先更新地块</span>
+updateBaseStatList(...)                                 <span class="comment">// ② 与人口等来源并列</span>
+updateCityHappiness(...)
+updateStatPercentBonusList(currentConstruction)
+updateFinalStatList(currentConstruction, ...)            <span class="comment">// ③ 扣消耗、算最终值</span>
+currentCityStats = newCurrentCityStats                  <span class="comment">// ④ 缓存给读取方</span>
+
+@Readonly fun foodForNextTurn() =
+    cityStats.currentCityStats.food.roundToInt()         <span class="comment">// ⑤ 读取净粮食</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/CityStats.kt">本地 CityStats.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L485">update · L485</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L292">foodForNextTurn · L292</a></p></div><div><p>① 城市更新先重算地块；否则人口刚换工作，读取到的城市粮食可能还是旧缓存。</p><p>② <code>statsFromTiles</code> 被放进基础统计树，与 Population、Buildings、Specialists、Trade routes 等来源并列。</p><p>③ 最终阶段会扣掉人口和专家消耗，再应用增长相关修正；它不是单纯把地块粮食原样返回。</p><p>④ <code>currentCityStats</code> 是缓存的最终城市七项统计，界面和回合逻辑都从这里读。</p><p>⑤ <code>foodForNextTurn()</code> 只取最终粮食并四舍五入为整数。它表示本回合净流量，和 <code>foodStored</code> 这个粮仓存量不是同一个数。</p></div></div>
+<table><thead><tr><th scope="col">这个城市的账目</th><th scope="col">计算</th><th scope="col">结果</th></tr></thead><tbody>
+<tr><td>城中心草地</td><td>第 13 课结算单</td><td>+2 粮</td></tr>
+<tr><td>有人工作的草地农场</td><td>草地 2 + Farm 1</td><td>+3 粮</td></tr>
+<tr><td>地块收入</td><td>2 + 3</td><td>+5 粮</td></tr>
+<tr><td>人口消耗</td><td>人口 1 × 2</td><td>−2 粮</td></tr>
+<tr><td><code>foodForNextTurn()</code></td><td>5 − 2</td><td><strong>+3 粮</strong></td></tr>
+</tbody></table>
+</section>
+
+<section id="growth"><h2>4. 存粮怎样换成人口</h2>
+<p>粮食有两个位置：<code>foodForNextTurn()</code> 是每回合流量，<code>foodStored</code> 是粮仓存量。回合结束时，<code>CityTurnManager</code> 把前者交给人口管理器；人口管理器再决定粮仓是否达到下一人口阈值。</p>
+<div class="paired"><div><pre><code><span class="comment">// CityPopulationManager。问：人口 1 需要多少粮？</span>
+fun getFoodToNextPopulation(): Int {
+    var foodRequired = 15 + 8 * (population - 1) +
+        floor((population - 1).toDouble().pow(1.5))    <span class="comment">// ① Civ V 基础曲线</span>
+    foodRequired *= city.civ.gameInfo.speed.modifier       <span class="comment">// ② 游戏速度</span>
+    if (city.civ.isCityState) foodRequired *= 1.5f        <span class="comment">// ③ 城邦</span>
+    if (!city.civ.isHuman())
+        foodRequired *= city.civ.gameInfo.getDifficulty()
+            .aiCityGrowthModifier                            <span class="comment">// ④ AI 难度</span>
+    return foodRequired.toInt()
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityPopulationManager.kt">本地 CityPopulationManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityPopulationManager.kt#L51">getFoodToNextPopulation · L51</a></p></div><div><p>① 基础曲线从人口数计算需求。人口 1 代入后是 <code>15 + 0 + floor(0)</code>，所以本案例需求为 15。</p><p>② 速度会整体调整需求，因此“人口 1 永远需要 15”不准确；15 是标准速度下的本案例数值。</p><p>③ 城邦额外乘 1.5；④ AI 还受难度修正。这些条件说明源码把平衡参数集中在同一个入口，而不是散在回合逻辑里。</p><p>本课手算先固定为标准速度、普通人类城市，避免把可选修正混进主模型。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// CityTurnManager.endTurn 与 CityPopulationManager.nextTurn（部分）。</span>
+} else city.population.nextTurn(city.foodForNextTurn()) <span class="comment">// ① 净粮食交给人口管理器</span>
+
+fun nextTurn(food: Int) {
+    foodStored += food                                     <span class="comment">// ② 流量进入粮仓</span>
+    if (foodStored &lt; 0) {                                  <span class="comment">// ③ 饥荒</span>
+        if (population &gt; 1) addPopulation(-1)
+        foodStored = 0
+    }
+    val foodNeededToGrow = getFoodToNextPopulation()       <span class="comment">// ④ 读取阈值</span>
+    if (foodStored &lt; foodNeededToGrow) return               <span class="comment">// ⑤ 还没长</span>
+    if (city.avoidGrowth) { foodStored = foodNeededToGrow; return } <span class="comment">// ⑥ 封顶</span>
+    foodStored -= foodNeededToGrow                         <span class="comment">// ⑦ 扣掉成本</span>
+    addPopulation(1)                                       <span class="comment">// ⑧ 人口增长</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityTurnManager.kt">本地 CityTurnManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityTurnManager.kt#L160">endTurn · L160</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityPopulationManager.kt#L99">nextTurn · L99</a></p></div><div><p>① 回合结算不把粮食直接加到人口，而是把净粮食交给人口管理器。</p><p>② 先把本回合流量加入存粮，所以存粮 12、净粮食 3 会得到 15。</p><p>③ 负粮食会触发饥荒：存粮跌破 0 时，人口大于 1 才减少人口，随后存粮归零。</p><p>④⑤ 读取当前人口的增长阈值；没到阈值就结束本回合。</p><p>⑥ <code>avoidGrowth</code> 会把存粮封在阈值，不增长；⑦⑧ 正常路径扣掉阈值，再增加 1 人口。完整源码还会在这里处理 <code>NullifiesGrowth</code> 与 <code>CarryOverFood</code>。</p></div></div>
+<p class="callout"><strong>把上面的数字串起来：</strong>人口 1、标准速度需要 15 粮。城市本回合净增 3 粮，粮仓从 12 变 15；达到阈值后扣掉 15，人口变 2，存粮回到 0。若本回合只净增 2，粮仓则是 14，人口不变。</p>
+</section>
+
+<section id="reassign"><h2>5. 增长后为什么要重新分配人口</h2>
+<p>人口增加不是只改一个整数。新人口必须找到工作，否则它是自由人口；同时城市统计需要重新计算，因为人口消耗变了，人口来源的生产力也变了。Unciv 把“增长完成”和“重新人口安排”连接起来，但没有把两者写成同一个循环。</p>
+<div class="paired"><div><pre><code><span class="comment">// CityPopulationManager.addPopulation 与 nextTurn 的增长尾部。</span>
+addPopulation(1)
+city.shouldReassignPopulation = true                        <span class="comment">// ① 标记需要重新分配人口</span>
+
+fun addPopulation(count: Int) {
+    val changedAmount = count.coerceAtLeast(1 - population)
+    population += changedAmount                                 <span class="comment">// ② 先改人数</span>
+    val freePopulation = getFreePopulation()
+    if (freePopulation &lt; 0) {
+        unassignExtraPopulation()                              <span class="comment">// ③ 人不够岗位时收回</span>
+        city.cityStats.update()
+    } else {
+        autoAssignPopulation()                                  <span class="comment">// ④ 有空闲人口就找工作</span>
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityPopulationManager.kt">本地 CityPopulationManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityPopulationManager.kt#L122">增长与人口安排 · L122</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityPopulationManager.kt#L136">addPopulation · L136</a></p></div><div><p>① 增长后设置重新分配人口标记，表示人口和工作集合可能暂时需要重新对齐。</p><p>② 先把人口数改掉；这会改变下次 <code>calcFoodEaten</code> 的消耗，也会改变 Population 来源的生产力。</p><p>③ 如果现有人口安排和专家已经超过新人口，就要撤掉多余分配。人口减少、城市被占或专家槽消失时也会走类似清理。</p><p>④ 正常增长后，自由人口进入 <code>autoAssignPopulation</code>，比较候选地块和专家，通常会立刻占一个新工作地点。</p><p>因此“人口 2”与“两个普通工作地”通常会一起出现，但这是自动安排人口的结果，不是 <code>population</code> 整数本身携带了地块信息。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// CityTurnManager.startTurn。问：为什么有时增长后不是马上完全重新分配？</span>
+if (city.isPuppet) {
+    city.setCityFocus(CityFocus.GoldFocus)
+    city.reassignAllPopulation()                         <span class="comment">// ① 傀儡城特殊焦点</span>
+} else if (city.shouldReassignPopulation || city.civ.isAI()) {
+    if (city.civ.isAI()) city.setCityFocus(chooseCityFocus()) <span class="comment">// ② AI 选焦点</span>
+    city.reassignPopulation()                             <span class="comment">// ③ 下一回合开始重新分配</span>
+} else {
+    city.cityStats.update()                               <span class="comment">// ④ 没必要重新分配时只更新统计</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityTurnManager.kt">本地 CityTurnManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityTurnManager.kt#L47">startTurn · L47</a></p></div><div><p>① 傀儡城使用固定的金币焦点并全部重新分配；② AI 会先选择城市焦点。</p><p>③ 普通城市若有 <code>shouldReassignPopulation</code>，在回合开始调用 <code>reassignPopulation</code>；它会重新应用锁定和自动安排人口规则。</p><p>④ 没有重新分配人口需求时仍会更新城市统计，因为科技、建筑或其它条件可能已经变化。</p><p>这里体现了状态和缓存的分工：人口变化设置“需要重新分配”的事实，回合管理器决定什么时候执行较贵的自动化，城市统计则负责把当前状态算成数值。</p></div></div>
+<p class="tip"><strong>与第 13 课的连接：</strong>人口新增后，<code>statsFromTiles</code> 可能因为多了一块人口工作的地块而增加；但人口自己的基础生产力来自 <code>CityStats.updateBaseStatList</code> 的 “Population” 行，不要把它重复塞进地块收入。</p>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul>
+<li><strong>所有权是“这块地归谁”，人口安排是“今天谁在这块地工作”。</strong><code>Tile.owningCity</code> 和 <code>City.workedTiles</code> 是两种不同状态。</li>
+<li><strong>人口不是地块列表。</strong><code>population</code> 只记录人数；普通人口安排坐标和专家分配分别保存在 <code>workedTiles</code> 与 <code>specialistAllocations</code>。</li>
+<li><strong>城市粮食结余是最终净值。</strong>地块收入先进入 <code>statsFromTiles</code>，城市统计再扣人口消耗，<code>foodForNextTurn()</code> 读取 <code>currentCityStats.food</code>。</li>
+<li><strong>存粮和流量要分开。</strong><code>foodStored</code> 是粮仓里已有多少，<code>foodForNextTurn()</code> 是本回合结算后增加或减少多少。</li>
+<li><strong>增长是一个回合边界动作。</strong>回合结束把净粮食加入存粮；达到阈值后扣阈值、增加人口，并触发后续重新分配人口与统计更新。</li>
+</ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看正文，凭记忆回答。选择题只是热身；真正的验收是能把“所有权 → 人口安排 → 地块收入 → 人口消耗 → 存粮增长”完整讲回源码。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. 普通地块进入城市地块收入，最直接还需要什么？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="所有权只是让地块成为本城候选；普通地块还必须通过 isWorked 进入工作地块集合。"><span>城市拥有的地</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="正确。城中心不占用人口也进账，免人口产出的特殊地例外进账；普通地块要通过 city.isWorked 才进入 updateTileStats。"><span>人口正在这块地工作</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="在城市范围内还不够，updateTileStats 不会把范围内全部普通地块都计入。"><span>城市范围内地</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="改良有自己的结算单，但普通地块是否进城市收入仍取决于人口安排或免人口产出规则。"><span>已经修好农田</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>2. 人口 1 的小城市为什么本回合净增 3 粮？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="5 粮是两块实际进账地的总和，不是增长阈值；人口 1 还要消耗 2 粮。"><span>城市最后剩下的粮食</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="粮仓存量是 foodStored，这个例子设置为 12；它不是本回合净流量。"><span>所有入账地块的粮食</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="正确。地块收入 5 粮，人口 1 默认消耗 2 粮，所以 foodForNextTurn() 为 3。"><span>扣除人口消耗后的粮食</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="15 粮是人口 1 到人口 2 的增长需求，不是本回合净粮食。"><span>粮仓保存的存量</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>3. 这个例子中存粮从 12 变成人口 2 的关键条件是什么？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="正确。12 加本回合净粮食 3 得 15，达到标准速度人口 1 的增长阈值，nextTurn 才会扣除阈值并增加人口。"><span>存粮达到增长阈值</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="本回合产出为正只能说明城市在增长，不代表已经达到人口阈值。"><span>本回合有粮食剩余</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="所有人都已安排工作会影响产出，但不会单独触发增长；触发条件是存粮达到阈值。"><span>人口已经全部安排</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="领土扩张与人口增长是不同管理器的状态变化，不能互相替代。"><span>领土扩张到了三环</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. “地块所有权”和“人口分配”的区别，最准确的说法是？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="正确。owningCity 记录归属，workedTiles 记录谁在哪些地块工作；归本城所有但无人工作的普通地块不会进入 statsFromTiles。"><span>所有权记地块归谁，分配记谁在哪些地块工作</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="两个概念说反了：owningCity 记归属，workedTiles 记实际工作；而且它们是两个不同字段，不是同一份记录。"><span>所有权记谁在工作，分配记地块归谁</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="三环只是工作范围的几何筛选；所有权要 takeOwnership 写入，分配要 workTile 写入，是两条独立的状态路径。"><span>地块进入城市三环就同时获得所有权和人口分配</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="改良完成改变的是地块的结算单产出，不会改写 owningCity 或 workedTiles；分配仍要由 workTile 或自动安排来记录。"><span>改良修完后，所有权和人口分配会自动同步</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：人口正在这块地工作；2：扣除人口消耗后的粮食；3：存粮达到增长阈值；4：所有权记地块归谁，分配记谁在哪些地块工作。分别对应 <a href="#ownership">所有权与人口分配</a>、<a href="#food">最终净粮食</a>、<a href="#growth">增长阈值</a>、<a href="#ownership">两个集合的区别</a>。</p></details>
+<h3>练习 A · 手算一个小城市（10 分钟）</h3><p>标准速度、普通人类城市、人口 1。城中心草地给 2 粮；一块归本城所有、且有人工作的草地农场给 3 粮；没有其它粮食修正。① <code>statsFromTiles.food</code> 是多少？② 人口消耗多少？③ <code>foodForNextTurn()</code> 是多少？④ 粮仓已有 12 时，本回合后会不会增长？</p><details class="rubric"><summary>展开核对要点</summary><p>① 是 5 粮：城中心 2 + 有人工作的农场 3。② 人口 1 默认消耗 2 粮。③ 最终净粮食为 5 − 2 = 3，<code>foodForNextTurn()</code> 返回 3。④ 会增长：12 + 3 = 15，达到人口 1 的标准速度阈值；扣除 15 后存粮为 0，人口变成 2。</p></details>
+<h3>练习 B · 所有但没工作（8 分钟）</h3><p>城市已经通过 <code>takeOwnership</code> 拿到一块草地农场，但人口仍在城中心，<code>workedTiles</code> 不包含这块农场。① 这块地属于谁？② 它是否是 <code>getWorkableTiles()</code> 的候选？③ 它会不会进入普通的 <code>statsFromTiles</code>？④ 如果调用 <code>workTile</code> 后呢？</p><details class="rubric"><summary>展开核对要点</summary><p>① <code>Tile.owningCity</code> 指向本城，城市的 <code>tiles</code> 也包含其坐标。② 若仍在工作范围内且没有其它所有者，它是候选。③ 不会，普通地块还要满足 <code>city.isWorked(it)</code>；只有城中心或免人口产出格可以例外进账。④ <code>workTile</code> 把坐标加入 <code>workedTiles</code>，下一次 <code>updateTileStats</code> 才把农场结算单加进城市。</p></details>
+<h3>练习 C · 增长后的人口去哪（6 分钟）</h3><p>人口 1 的城市本回合达到增长阈值，调用 <code>addPopulation(1)</code> 后，为什么不能只把 <code>population</code> 加一就结束？请按源码说出至少两个后续动作。</p><details class="rubric"><summary>展开核对要点</summary><p>人口增加会先改变人口消耗和 Population 来源的统计；然后 <code>getFreePopulation</code> 可能变为正，<code>autoAssignPopulation</code> 会比较地块和专家并调用 <code>workTile</code> 或分配专家；增长还设置 <code>shouldReassignPopulation</code>，让回合开始时按焦点重新排班；最后城市统计需要更新。</p></details>
+<h3>练习 D · 本地核验（可选，10 分钟）</h3><p>运行既有 <a href="../../tests/src/com/unciv/logic/city/managers/CityPopulationManagerTest.kt">CityPopulationManagerTest</a>：① 哪个测试证明 14 存粮加 1 粮会增长？② 哪个测试证明增长后会自动安排人口？③ 哪个测试证明多出的粮食会结转？再回到 <code>CityPopulationManager.nextTurn</code> 找对应分支。</p><details class="rubric"><summary>展开核对要点</summary><p>① <code>should increase pop when enough food is stored</code> 设置 14 并调用 <code>nextTurn(1)</code>，断言人口为 2、存粮为 0。② <code>should automatically assign new pop to job</code> 同样增长，并断言自由人口为 0。③ <code>should carry over excess food when new pop is born</code> 设置 14、加入 4，增长后断言存粮为 3；对应源码是先扣 15，再留下超出的 3。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/city/managers/CityPopulationManager.kt">CityPopulationManager.kt</a> 的 <code>getFreePopulation</code>、<code>getFoodToNextPopulation</code>、<code>nextTurn</code> 和 <code>autoAssignPopulation</code>；再读 <a href="../../core/src/com/unciv/logic/city/City.kt">City.kt</a> 的 <code>workedTiles</code>、<code>workTile</code> 与 <code>foodForNextTurn</code>；最后对照 <a href="../../core/src/com/unciv/logic/city/CityStats.kt">CityStats.kt</a> 的 <code>updateTileStats</code>、<code>update</code>、<code>calcFoodEaten</code>，用 <a href="../../tests/src/com/unciv/logic/city/managers/CityPopulationManagerTest.kt">CityPopulationManagerTest.kt</a> 核对增长、饥荒、结转和自动安排人口。</p><p>下次学习前，先不看正文默写四个词的区别：<code>Tile.owningCity</code>、<code>City.workedTiles</code>、<code>foodStored</code>、<code>foodForNextTurn()</code>。约一周后重做练习 A 和 B；如果把“所有”说成“正在工作”，回第 1 节重看两个集合。</p><p>第 15 课会承接同一条城市统计链，追踪生产力怎样进入建造、何时完成以及溢出。第 13～14 课的经济入口仍只讲到城市层，文明账本留到第 16 课。有任何源码分支解释不通，直接问教学助手，并附上方法名和自己的手算。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0013-tile-yields.html">上一课：一块地怎样变成产出</a><a href="reference/architecture.html">架构速查</a><a href="0015-production-construction.html">下一课：生产力怎样完成建造</a></div></section>
+<footer>资料核对：2026-09-18。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。这个例子（标准速度、普通人类城市、人口 1）：城中心草地 2 粮 + 有人工作的草地农场 3 粮 = 地块收入 5 粮；人口消耗 2 粮，foodForNextTurn = 3；存粮 12 加 3 达到 15，人口增长到 2，存粮回到 0。人口分配和地块所有权由不同字段表示。源码基线：1df6249a41301056ddc4448a95a93ddf5403e061。</footer>
+</main></div>
+</body>
+</html>
+

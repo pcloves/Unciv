@@ -1,0 +1,187 @@
+:root {
+  color-scheme: light;
+  --ink: #252c2b;
+  --muted: #586460;
+  --line: #d8dfdc;
+  --paper: #ffffff;
+  --wash: #f4f7f5;
+  --green: #17644f;
+  --link: #2459a3;
+  --red: #963a46;
+}
+* { box-sizing: border-box; letter-spacing: 0; }
+/* Windows 的 Consolas 自带 ①②③ 但字形极小；用 @font-face 把圈号截给全尺寸字体。
+   雅黑实测只有 ①-⑩（U+2460-2469），⑪ 起交给 Segoe UI Symbol。
+   Symbol 的圈号墨迹只有雅黑的 78%，size-adjust 127% 拉到与雅黑同大（92.1 vs 92.4 / em）。
+   若笔画粗细仍显不统⼀，可把两个 range 合并改⽤ local("MS Gothic")——它 ①-⑳ 全有，同为全宽粗圈。
+   ㉑（U+3251）以后本机字体均缺，若用到需自备。 */
+@font-face {
+  font-family: "CircledNums";
+  src: local("Microsoft YaHei"), local("MicrosoftYaHei");
+  unicode-range: U+2460-2469;
+}
+@font-face {
+  font-family: "CircledNums";
+  src: local("Segoe UI Symbol");
+  unicode-range: U+246A-24FF;
+  size-adjust: 127%;
+}
+html { scroll-padding-top: 20px; }
+body {
+  margin: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 18px;
+  line-height: 1.8;
+}
+a { color: var(--link); text-underline-offset: 4px; overflow-wrap: anywhere; }
+a:hover { color: var(--green); }
+:focus-visible { outline: 3px solid var(--link); outline-offset: 4px; }
+.skip { position: absolute; top: -100px; left: 16px; background: white; z-index: 3; padding: 8px; }
+.skip:focus { top: 8px; }
+.topbar {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px 28px;
+  padding: 15px max(24px, calc((100% - 1912px) / 2));
+  border-bottom: 1px solid var(--line); font-size: 15px;
+}
+.topbar strong { color: var(--green); margin-right: auto; }
+.topmenu { position: relative; margin: 0; padding: 0; border-bottom: 0; }
+.topmenu summary { cursor: pointer; list-style: none; color: var(--link); text-underline-offset: 4px; }
+.topmenu summary::-webkit-details-marker { display: none; }
+.topmenu summary::after { content: " ▾"; font-size: 12px; color: var(--muted); }
+.topmenu summary:hover { color: var(--green); }
+.topmenu[open] summary { margin-bottom: 0; }
+.topmenu .menu { position: absolute; top: calc(100% + 12px); left: -8px; z-index: 2; min-width: 205px; background: var(--paper); border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(37, 44, 43, .12); padding: 8px 0; display: flex; flex-direction: column; }
+.topmenu .menu a { padding: 7px 18px; text-decoration: none; }
+.topmenu .menu a:hover { background: var(--wash); color: var(--green); }
+.layout {
+  display: grid; grid-template-columns: 206px minmax(0, 1fr);
+  gap: 46px; max-width: 1960px; padding: 32px 24px 72px; margin: auto;
+}
+.toc { position: sticky; top: 20px; align-self: start; font-size: 15px; max-height: calc(100vh - 40px); overflow: auto; }
+.toc a { display: block; padding: 6px 0; text-decoration: none; }
+.toc strong { display: block; padding-bottom: 12px; color: var(--muted); }
+.toc .meta { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 14px; }
+main, section, .paired > *, .quiz-grid > * { min-width: 0; }
+h1, h2, h3 { line-height: 1.35; font-weight: 650; overflow-wrap: anywhere; }
+h1 { font-size: 34px; margin: 10px 0 16px; }
+h2 { font-size: 26px; margin: 0 0 18px; }
+h3 { font-size: 20px; margin: 16px 0 10px; }
+p { margin: 12px 0; }
+ul, ol { padding-left: 26px; }
+li { margin: 7px 0; }
+.eyebrow { font-size: 14px; color: var(--green); font-weight: 650; }
+.lead { font-size: 20px; }
+.meta, figcaption, .source { font-size: 14px; color: var(--muted); }
+.source { margin: 8px 0 16px; }
+.source a { margin-right: 14px; }
+section { border-top: 1px solid var(--line); margin-top: 32px; padding-top: 28px; }
+.paired { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.paired.equal { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+code { font-family: "CircledNums", Consolas, "Cascadia Code", "Microsoft YaHei", monospace; font-size: .9em; overflow-wrap: anywhere; }
+:not(pre) > code { background: var(--wash); padding: 1px 4px; }
+pre { margin: 12px 0; padding: 20px 16px; background: var(--wash); border-left: 3px solid #a9bcb2; overflow-x: auto; tab-size: 4; line-height: 1.65; }
+pre code { font-size: 15px; overflow-wrap: normal; }
+/* 行尾注释放不下时自动折到下一行，长行不再撑出水平滚动条 */
+.comment { color: #416a59; display: inline-block; white-space: pre-wrap; overflow-wrap: break-word; vertical-align: top; }
+.callout { border-left: 3px solid var(--green); padding: 8px 18px; margin: 20px 0; background: #f3f8f5; }
+.callout.tradeoff { border-color: var(--red); background: #fbf5f6; }
+.callout strong:first-child { color: var(--green); }
+.callout.tradeoff strong:first-child { color: var(--red); }
+.mental { border-top: 3px solid var(--green); }
+.mental li { margin: 10px 0; }
+figure { margin: 20px 0; }
+img { display: block; max-width: 100%; height: auto; }
+.game-image { width: 100%; max-width: 900px; }
+figcaption { margin-top: 8px; }
+.flow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; list-style: none; padding: 0; counter-reset: step; }
+.flow li { counter-increment: step; border-top: 3px solid var(--line); padding-top: 10px; }
+.flow li::before { content: counter(step, decimal-leading-zero); display: block; font: 15px Consolas, monospace; color: var(--green); }
+.flow strong, .flow span { display: block; }
+.flow span { font-size: 15px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; text-align: left; font-size: 16px; }
+th { background: var(--wash); font-weight: 650; }
+td, th { padding: 12px 14px; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.number { width: 54px; color: var(--green); font-family: Consolas, monospace; }
+.state { white-space: nowrap; font-size: 14px; color: var(--muted); }
+.state.ready { color: var(--green); font-weight: 650; }
+details { padding: 12px 0; border-bottom: 1px solid var(--line); }
+summary { cursor: pointer; font-weight: 600; }
+details[open] summary { margin-bottom: 14px; }
+.quiz-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px; }
+.quiz { border: 1px solid var(--line); border-radius: 4px; padding: 22px; }
+fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+legend { font-weight: 650; padding: 0 0 16px; font-size: 18px; }
+.option { display: flex; gap: 12px; align-items: center; min-height: 46px; cursor: pointer; }
+.option input { margin: 0; accent-color: var(--green); width: 18px; height: 18px; flex-shrink: 0; }
+button { font: inherit; font-size: 16px; cursor: pointer; padding: 7px 18px; border: 1px solid var(--green); border-radius: 4px; color: white; background: var(--green); min-height: 42px; margin-top: 14px; }
+button:hover { background: #104d3c; }
+.feedback { display: block; min-height: 86px; margin-top: 14px; font-size: 16px; }
+.feedback[data-result="correct"] { color: var(--green); }
+.feedback[data-result="incorrect"] { color: var(--red); }
+.rubric { font-size: 16px; }
+.nav-bottom { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 18px; padding-top: 24px; margin-top: 28px; border-top: 1px solid var(--line); }
+footer { color: var(--muted); font-size: 14px; padding-top: 20px; }
+.reference .layout { max-width: 1540px; }
+.reference dt { font-weight: 650; margin-top: 14px; }
+.reference dd { margin: 2px 0 16px; }
+@media (max-width: 1100px) {
+  .layout { gap: 26px; grid-template-columns: 170px minmax(0, 1fr); }
+  .paired, .paired.equal { grid-template-columns: 1fr; gap: 12px; }
+  .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  body { font-size: 17px; }
+  .topbar { padding: 12px 18px; gap: 8px 18px; }
+  .topbar strong { width: 100%; }
+  .layout { display: block; padding: 20px 18px 40px; }
+  .toc { position: static; max-height: none; margin-bottom: 26px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+  .toc a { display: inline-block; margin-right: 16px; }
+  .toc .meta { display: none; }
+  h1 { font-size: 28px; }
+  h2 { font-size: 23px; }
+  .quiz-grid { grid-template-columns: 1fr; }
+  pre { padding: 14px; }
+  td, th { padding: 10px 8px; }
+  .quiz { padding: 18px; }
+}
+@media screen and (max-width: 760px) {
+  .table-wrap.wide > table { min-width: 680px; }
+}
+@media print {
+  @page { size: A4; margin: 14mm; }
+  body { color: #000; font-size: 10.5pt; line-height: 1.6; }
+  .topbar, .toc, .skip, .nav-bottom, button, .no-print { display: none !important; }
+  .layout, .reference .layout { display: block; padding: 0; max-width: none; }
+  h1 { font-size: 22pt; }
+  h2 { font-size: 17pt; break-after: avoid; }
+  h3 { font-size: 12pt; break-after: avoid; }
+  .lead { font-size: 12pt; }
+  .paired, .paired.equal, .quiz-grid { display: block; }
+  section { margin-top: 18pt; padding-top: 14pt; }
+  a { color: #000; text-decoration: underline; }
+  pre { white-space: pre-wrap; overflow: visible; padding: 10pt; break-inside: avoid; }
+  pre code { font-size: 9pt; overflow-wrap: anywhere; }
+  table, .rubric { font-size: 10pt; }
+  .table-wrap { overflow: visible; }
+  .quiz, figure, .callout, tr { break-inside: avoid; }
+  .quiz { margin-top: 12pt; }
+  .feedback { min-height: 0; }
+  .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .game-image { max-width: 130mm; }
+  .meta, .source, figcaption, footer { font-size: 9pt; }
+  .reference { font-size: 9.5pt; line-height: 1.45; }
+  .reference h1 { font-size: 20pt; }
+  .reference h2 { font-size: 14pt; margin-bottom: 8pt; }
+  .reference p { margin: 6pt 0; }
+  .reference .paired.equal { display: block; columns: 2; column-gap: 14pt; }
+  .reference dl { break-inside: avoid; margin: 0; }
+  .reference section { margin-top: 12pt; padding-top: 10pt; }
+  .reference dt { margin-top: 6pt; }
+  .reference dd { margin-bottom: 6pt; }
+  .reference table { font-size: 9.5pt; }
+  .reference td, .reference th { padding: 7pt; }
+  .reference #turn { break-before: page; }
+}

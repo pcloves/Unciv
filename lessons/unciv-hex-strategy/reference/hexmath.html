@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unciv 地图与坐标速查</title><link rel="stylesheet" href="../../assets/course.css"></head>
+<body class="reference"><a class="skip" href="#main">跳到正文</a><header class="topbar"><strong>Unciv / 速查</strong><a href="../index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="../index.html#phase-a">A · 全局模型 01～04</a><a href="../index.html#phase-b">B · 地图专题 05～12</a><a href="../index.html#phase-c">C · 经济专题 13～19</a><a href="../index.html#phase-d">D · 系统联动 20～24</a><a href="../index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="architecture.html">架构速查</a><a href="hexmath.html">地图与坐标速查</a></header><div class="layout"><nav class="toc" aria-label="速查目录"><strong>地图速查</strong><a href="#coord">坐标与轴</a><a href="#neighbors">邻居偏移</a><a href="#distance">距离</a><a href="#screen">屏幕换算</a><a href="#ring">环与编号</a><a href="#storage">存储与环绕</a><a href="#noise">噪声与分布</a><a href="#elevation-rivers">山地与河流</a><a href="#regions-resources">区域与资源</a><a href="#pathing">移动与寻路</a><a href="#sight">视野与迷雾</a><a href="#tests">测试</a><a href="#redblob">与 Red Blob 对照</a><a href="#sources">源码与资料</a></nav><main id="main"><div class="eyebrow">第 05 课配套 / 可打印</div><h1>六边形坐标、邻居、距离与屏幕换算</h1><p>对应源码版本 <code>1df6249</code>。坐标与运算集中在 <code>core/src/com/unciv/logic/map/HexMath.kt</code>，测试在 <code>tests/src/com/unciv/logic/map/HexmathTests.kt</code>。</p>
+<section id="coord"><h2>坐标与轴</h2><pre><code>HexCoord(x, y)          x 轴 → 左上邻居（10 点钟）；y 轴 → 右上邻居（2 点钟）
+屏幕 y 轴向上；六边形平顶摆放；“正上方”一步 = (1,1)
+
+                (1,1)       ← 12 点钟：正上方
+          (1,0)      (0,1)  ← 10 点钟（x 轴）/ 2 点钟（y 轴）
+                (0,0)       ← 自己
+          (0,-1)     (-1,0) ← 8 点钟 / 4 点钟
+                (-1,-1)     ← 6 点钟：正下方
+
+  x+y= 2    (2,0)      (1,1)      (0,2)     ← 同一高度，从左到右排列
+  x+y= 1        (1,0)      (0,1)
+  x+y= 0   (1,-1)      (0,0)      (-1,1)
+  x+y=-1        (0,-1)     (-1,0)
+  x+y=-2   (0,-2)     (-1,-1)     (-2,0)    ← y-x 相同 → 同一竖线</code></pre><p>运算：<code>plus / minus / times</code> 返回新坐标；<code>HexCoord.Zero</code> 与 <code>HexCoord.of(x, y)</code>；存档格式 <code>{"x":3,"y":-2}</code>（x、y 为 0 时省略）。<code>City.location</code>、<code>Tile.position</code> 都是 HexCoord；<code>TileMap</code> 的 <code>tileMatrix[x - leftX][y - bottomY]</code> 用它做密集索引。</p></section>
+<section id="neighbors"><h2>邻居偏移</h2><table><thead><tr><th scope="col">钟点</th><th scope="col">方向</th><th scope="col">偏移 (dx, dy)</th><th scope="col">NeighborDirection</th></tr></thead><tbody><tr><td>12（=0）</td><td>正上</td><td>(1, 1)</td><td><code>Top</code></td></tr><tr><td>2</td><td>右上</td><td>(0, 1)</td><td><code>TopRight</code></td></tr><tr><td>4</td><td>右下</td><td>(-1, 0)</td><td><code>BottomRight</code></td></tr><tr><td>6</td><td>正下</td><td>(-1, -1)</td><td><code>Bottom</code></td></tr><tr><td>8</td><td>左下</td><td>(0, -1)</td><td><code>BottomLeft</code></td></tr><tr><td>10</td><td>左上</td><td>(1, 0)</td><td><code>TopLeft</code></td></tr></tbody></table><p>相邻 = 坐标加偏移。<code>HexMath.clockPositionToHexcoordMap</code>（L277）是权威表，0 与 12 都映射 (1,1) 以便取模；<code>TileMap.getClockPositionNeighborTile(tile, clockPosition)</code>（L443）按偏移查地块，<code>getNeighborTileClockPosition</code> 从坐标差反推钟点。</p></section>
+<section id="distance"><h2>距离</h2><pre><code>getDistance(origin, destination)：相对差 relativeX = originX - destinationX
+    relativeX * relativeY &gt;= 0  → max(|relativeX|, |relativeY|)   两差同号
+    否则                        → |relativeX| + |relativeY|       两差异号
+
+本质：立方坐标距离的化简。立方映射 hex2CubicCoords = (y-x, x, -y)
+    distance = max(|Δx|, |Δy|, |Δ(y-x)|)
+    （Red Blob 轴向写法 max(|Δq|, |Δr|, |Δq+Δr|) 是同一个公式）</code></pre><p>例：(2,3)→(5,0)：Δx=−3、Δy=+3，异号 → 6；(2,3)→(4,4)：Δx=−2、Δy=−1，同号 → 2。注意 getDistance 不处理环绕；带环绕的等价坐标由 <code>TileMap.getUnwrappedPosition</code> / <code>HexMath.getUnwrappedNearestTo</code> 处理（见<a href="#storage">存储与环绕</a>）。</p></section>
+<section id="screen"><h2>屏幕换算</h2><pre><code>hex2WorldCoords(x, y)：worldX = 1.5·(y-x)，worldY = 0.866·(x+y)（相邻中心距 = √3 的单位，调用处乘像素尺寸）
+world2HexCoords：解 2×2 方程组（克莱姆法则），结果可能是小数
+roundHexCoords：转立方坐标 (y-x, x, -y) → 三分量四舍五入 → 误差最大的分量改成另两者的负和
+
+纬度 getLatitude = x + y（管屏幕上下，赤道 = x+y=0）
+经度 getLongitude = x - y（向左增大）
+列号 getColumn = y - x（向右增大，与经度互为相反数）</code></pre><p>第六课推导用 S=x+y 表示竖直位置、D=y−x 表示水平位置，省去画面换算的固定比例。源码命名见 <a href="../../../core/src/com/unciv/logic/map/HexMath.kt">HexMath.kt</a> 的 getLatitude、getLongitude、getColumn。使用点包括 TileGroupMap、MinimapTile 和 EditorMapHolder.getClosestTileTo。</p></section>
+<section id="ring"><h2>环与编号</h2><pre><code>n 层六边形总格数 = 1 + 6·n·(n+1)/2          getNumberOfTilesInHexagon(n)
+第 ring 环起点 = 1 + 6·ring·(ring-1)/2      第 1 环编号 1~6，第 2 环 7~18 ……
+连续编号 = 环起点 + 环内序号                getZeroBasedIndex / mapRelativePositionToPositiveIntRedblob
+环坐标列表 = getHexCoordsAtDistance(origin, distance, maxDistance, worldWrap)  沿钟面三条边 + 原点两倍镜像
+范围内全部格 = getHexCoordsInDistance(origin, distance, worldWrap)  各环并集</code></pre><p><code>getZeroBasedIndex</code> 用 when 分支直接推环内序号（快约 5 倍）；<code>mapRelativePositionToPositiveIntRedblob</code> 是逻辑等价的教学版（环起点 + indexOf）。两者由 <code>testMappingIsOneToOne</code> 保证一致。</p></section>
+<section id="storage"><h2>地块存储与环绕</h2><pre><code>tileList（序列化）   全部地块的权威列表，存档顺序 = zeroBasedIndex（寻路位图索引用）
+tileMatrix（瞬态）  按坐标 O(1) 查：[x-leftX][y-bottomY]，六边形地图四角是 null
+leftX/bottomY/width @Transient；setTransients 扫 tileList 建矩阵（先填满，再重建引用）
+
+get(x,y)      = tileMatrix[...]!!，遇 null/越界抛异常（热路径）
+getOrNull     = 矩阵安全查询，越界或空洞返回 null；不环绕
+getIfTileExistsOrNull = 查不到时按环绕补偿：先 (x+radius, y−radius)，再 (x−radius, y+radius)
+
+矩形图宽 W=2r：加 (r,−r)，竖直位置 S=x+y 不变，水平位置 D=y−x 减少 W
+例：(-1,2) 加 (3,-3) 得 (2,-1)；S 都为 1，D 从 3 变为 -3
+getUnwrappedPosition = 两个等价坐标取平方和小的（离原点近）
+aerialDistanceTo     = min(直线距离, 展开到等价坐标后的距离)；直线超过 width/2 才算绕圈
+getNeighborTileClockPosition = 相邻地块间反推钟点，含补偿分支；不可当作任意两格的相邻校验
+
+Tile 分层：position / baseTerrain(必有) / terrainFeatures(叠加) / naturalWonder / resource(+resourceAmount)
+          / improvement(+Pillaged) / roadStatus / hasBottom*River 三布尔
+河流字段位于 Tile，描述其左下、正下、右下三条边。
+B 在 A 右上时：A 查 B 与 B 查 A 都读取 B.hasBottomLeftRiver。
+名字→对象：setTerrainTransients 按 ruleset 查回 Terrain，并预存 isLand/isWater/isOcean
+allTerrains = base → wonder → features 的地形对象序列</code></pre><p>来源：<a href="../../../core/src/com/unciv/logic/map/TileMap.kt">TileMap.kt</a>（L93 矩阵、L584 setTransients、L380 环绕、L463 展开、L410 反推方向）· <a href="../../../core/src/com/unciv/logic/map/tile/Tile.kt">Tile.kt</a>（L48 字段、L116 neighbors 惰性缓存、L856 setTerrainTransients、L666 aerialDistanceTo）· <a href="../../../core/src/com/unciv/logic/map/MapParameters.kt">MapParameters.kt</a>（L83 worldWrap）。构造器：按半径（getHexCoordsInDistance）或按宽高（getTileCoordsFromColumnRow，环绕宽取偶数）。</p></section>
+<section id="noise"><h2>噪声与地形分布</h2><pre><code>陆海判定（MapLandmassGenerator.spawnLandOrWater L99）
+    elevation &lt; waterThreshold → 水；否则 → 陆。所有地图类型只改 elevation 公式。
+    waterThreshold 来自界面滑块 Water level（−0.1～0.1，默认 0）；retryLoweringWaterLevel
+    水超 70% 时下调阈值重试（每轮重抽噪声种子），最多 30 次。
+
+柏林噪声（Perlin.kt，object，置换表写死 256 项）
+    noise(x,y,z)：floor 定格子 → 小数位置过 fade(t)=t³(t(6t−15)+10)（端点导数 0）
+                  → 8 角哈希选梯度做点积 → lerp 三线性插值。连续性的全部来源。
+    and 255 使格子坐标循环 → 噪声每 256 个单位重复；种子只选切面（z 层 + offset），不换噪声场。
+    noise3d：多倍频叠加，freq ×= lacunarity（默认 2），amp ×= persistence（默认 0.5），
+             total/max 归一化；默认 6 倍频（getPerlinNoise）。
+    ridgedNoise3d：每倍频取 abs —— 0 等值带变尖脊，群岛/山脉走向用。
+
+参数 → 分布形态
+    scale 调大   特征变大（整块大陆/大洋）；调小 → 斑点碎岛
+    nOctaves ↑   边缘更破碎；persistence ↑ 高频细节更明显；lacunarity 各层频率比
+    温度 = (5×(1−2|纬度|) + 1×同 scale 单倍频噪声)/6 → 幂 |t|^(1−intensity) 保号 → +shift 截断
+    湿度 = 单倍频噪声 (n+1)/2 → 0..1（+humidityShift，暖移时 −shift/2 干燥补偿）
+
+地形匹配（规则集，不在代码里）
+    每地形一组 "Occurs at temperature between [a] and [b] and humidity between [c] and [d]"
+    unique → 温湿矩形，半开区间 (From, To]；全不匹配 ifEmpty{整组随机} 兜底。
+     匹配多个 → randomOrNull(RNG)。Tile.humidity/temperature 是 @Transient，仅生成期用，
+     植被/冰等后续阶段继续查询。</code></pre><p>来源：<a href="../../../core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt">MapLandmassGenerator.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/Perlin.kt">Perlin.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/MapGenerationRandomness.kt">MapGenerationRandomness.kt</a>（getPerlinNoise/getNoise）· <a href="../../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">MapGenerator.kt</a>（applyHumidityAndTemperature L512、TerrainOccursRange L71）· <a href="../../../android/assets/jsons/Civ V - Vanilla/Terrains.json">Terrains.json</a>。环绕噪声卷圆柱入口见第 07 课正文第 4 节。</p></section>
+<section id="elevation-rivers"><h2>山地与河流</h2><pre><code>山地丘陵（MapElevationGenerator.raiseMountainsAndHills L33）
+    候选表按 unique 分桶：flats（平地）/ hills（Occurs in groups）/ mountains（Occurs in chains），
+    不写死地形名；原版 Hill=TerrainFeature、Mountain=Land。
+    每陆地格：getPerlinNoise(scale=2.0) → powSigned(指数) → &gt;0.7 山 / &gt;0.5 丘 / 否则平地。
+    powSigned=保号幂（abs^指数 × sign）：指数&lt;1 抬升 0..1 的值（0.3^0.3≈0.70），解决噪声量程
+    ±0.55 够不着阈值 0.7 的问题；指数就是滑块旋钮——滑块越大指数越小、抬升越猛、山越多。
+    指数 = 1 − elevationExponent(滑块 Map Elevation 0.6~0.8) − boreal 偏移 0.03。
+    幂前门槛 = 阈值^(1/指数)（反解开方）：0.6→0.41 / 0.7→0.30 / 0.8→0.17，滑块越大门槛越低山越多。
+
+细胞自动机修形（cellularMountainRanges L71 / cellularHills L119，各 5 轮）
+    每轮两段：扫全图挂 ~Raising~/~Lowering~ 假特征 → 统一兑现（applyTerrain 升/降）。
+    山：孤山 1/4 拆、单邻山平地 1/10 升、邻 3 不可通行 1/2 拆、&gt;3 必拆；目标 = 初始山数 ×2。
+    丘：孤丘/密丘（&lt;=1 或 &gt;3 丘邻）1/2 拆、山+丘邻 2..3 的平地 1/2 升；目标 ≈ 现状（90%~100% 微调）。
+
+河流 = 边属性（Tile L89 三布尔）
+    hasBottomLeftRiver / hasBottomRiver / hasBottomRightRiver 只描述下半圈三边；
+    上半圈归邻居。B 在 A 右上时双向查询都读 B.hasBottomLeftRiver（isConnectedByRiver L699）。
+    isAdjacentToRiver L715 = 自有三边任一有河 || 任一邻居间有河；带 @Cache，写入口失效两侧缓存。
+    写入口 setConnectedByRiver L1237：六方向 when 表返回属性引用；编辑器/生成器/自然奇观全走这里。
+    虚拟 River 地形（Terrains.json）：从不落格，只挂产出与 [River] 条件 unique。
+
+生成画河（RiverGenerator.spawnRivers L30 → spawnRiver L73，走顶点）
+    数量 = 陆地格 × riverCountMultiplier（默认 0.01，四舍五入；ModConstants L93）。
+    源头三级降级：山 → 丘 → 陆地，均要求 isFarEnoughFromWater（1..minRiverLength−1=4 环内无水）；
+    chooseSpreadOutLocations 均匀撒点。
+    RiverCoordinate = 锚定格 + 5/7 点钟（BottomRightOrLeft）；每顶点 touches 三格、相邻三顶点。
+    走线：三候选按 "touches 三格的最小距海距离" 分组 → 最小组内随机（贪心+随机=蜿蜒）；
+    顶点 touches 水即停；repeat(maxRiverLength=666) 兜底。
+    paintTo L154：同格换侧涂 hasBottomRiver；跨格移动涂归属格自己的下边。
+
+河岸转换与运行期加河
+    convertTerrains（MapGenerator L330）：兑现 "Becomes X when adjacent to [River]"——
+    Desert→Flood plains（特征，过 occursOn）、Tundra→Plains、Snow→Tundra；生成后全图跑一遍。
+    continueRiverOn（RiverGenerator L224，companion）：游戏内 OneTimeChangeTerrain 加河，
+    按边评分（连海/接通开放端加分、Y 形减分）挑一条边，setConnectedByRiver(convertTerrains=true)；
+    随机源是 stateBasedRandom（gameId 混入），与生成期 RNG 分属两套边界。</code></pre><p>来源：<a href="../../../core/src/com/unciv/logic/map/mapgenerator/MapElevationGenerator.kt">MapElevationGenerator.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/RiverGenerator.kt">RiverGenerator.kt</a> · <a href="../../../core/src/com/unciv/logic/map/tile/Tile.kt">Tile.kt</a> · <a href="../../../core/src/com/unciv/models/ModConstants.kt">ModConstants.kt</a> · <a href="../../../android/assets/jsons/Civ V - Vanilla/Terrains.json">Terrains.json</a>。REPL 实测（Small 六边、seed 42）：705 格 / 510 陆地 / 5 条河 / 81 条河边 / 2 格泛滥平原。</p></section>
+<section id="regions-resources"><h2>区域与资源</h2><pre><code>调用位置（MapGenerator.generateMap L204 起，新游戏分支）
+    assignContinents → RiverGenerator → convertTerrains
+    → generateRegions（区域数 = 大文明数）→ assignRegions（起点 + 分桶）
+    → NaturalWonderGenerator（先放奇观，打 impact）→ placeResourcesAndMinorCivs
+    → spreadAncientRuins；编辑器分支只做 spreadResources 兜底（无区域/起点）
+
+区域切分（MapRegions，全流程无 RNG，结果可复现）
+    碎岛判定 usingArchipelagoRegions：最大大陆 / 全部陆地 &lt; 0.25（TileMap L571）
+      碎岛 → 整图一个 continentID=-1 的矩形，直接二分
+      大陆 → 按 tile.getTileFertility(true) 累加 continentFertility，
+             再 repeat(区域数) 取 max(fertility /(1+已分数)) 分配文明（同块大陆第二次价值减半）
+    每个大陆：列号包成矩形（起点列 = 左侧无邻列的最右列；跨接缝置 affectedByWorldWrap）
+    divideRegion / splitRegion：目标 = totalFertility × 份数百分比，沿长边逐格累加取最接近的一刀，
+      份数 n 先切成 n/2 与 n−n/2；终止于份数 1 → 区域数恒等于传入值
+
+    区域类型 assignRegionTypes：地形按 getRegionPriority 升序检查，
+      先判 “A Region can not contain more [X] than [Y]” 排除，再判
+      “A Region is formed with at least [N]% …” 入选，命中 break；无命中即 "Hybrid"。
+      原版优先级：Tundra 1 / Jungle 2 / Forest 3 / Desert 4 / Hill 5 / Plains 6 / Grassland 7
+      （数字小的先判）；Hill 带 “Base Terrain … not counted” 只数特征
+    getTileFertility：地形 unique 的 Fertility 之和 + 临河 1 + 临淡水 1 + 临海 2（临河同时命中淡水 = +2）
+
+出生点评价（RegionStartFinder，无 RNG，纯查表）
+    搜索顺序：中心 33% 矩形 → 67% 中环 → 外环 → fallback →（极端时造地）
+    findGoodPosition：排除 isTwoFromCoast、非本大陆；只取陆地非不可通行；
+      分 riverTiles / wetTiles / dryTiles 三组，按序取组内 isGoodStart 且 startScore 最高者
+    evaluateTileForStart（累计三环的 food/prod/good/junk/rivers）
+      临海 +40；下限 minimumFoodForRing {1:1,2:4,3:4}、Prod {1:0,2:0,3:2}、Good {1:3,2:6,3:8}
+      第 1 环：foodScore + prodScore + 临河 + good×2 − junk×3
+        粮表 [0,8,14,19,22,24,25]（0..6）、锤表 [0,10,16,20,20,12,0]（0..6）
+      第 2 环：粮表 [0,2,5,10,20,25,28,30,32,34,35]（0..10，&gt;10 取末项）
+        有效锤 = if (prod ≥ food×2) prod else (food+1)/2；锤表 [0,10,20,25,30,35]（0..5，&gt;5 取末项）
+      第 3 环：food + prod + good + 临河 − junk×2
+      totalJunk &gt; maximumJunk(9) → 否决；closeStartPenalty &gt; 0 → 否决并扣 score×penalty%
+    closeStartPenaltyForRing：0:99 1:97 2:95 3:92 4:89 5:69 6:57 7:24 … 13:4；
+      重叠取 max(旧,新)×1.2 封顶 97（MapGenTileData.addCloseStartPenalty）
+
+起点修正（StartNormalizer，会改地图）
+    normalizeStart：清邻格不可通行特征（冰）→ Strategic Balance 保底 → normalizeProduction
+      → calculateFoodBonusesNeeded + placeFoodBonuses →（非城邦）addProductionBonuses
+    生产力：innerProduction == 0 或 (inner &lt; 2 且 outer &lt; 8) 或（城邦 inner &lt; 4）
+      → 邻格加一个 TerrainFeature 且 production ≥ 2 的丘陵；inner &lt; 3 且 early &lt; 6 → 二环补早期战略资源
+    粮食：innerFood/outerFood 按 (潜在粮² / 4) 求和；档位大文明 5→0、城邦 2→0；
+      传奇开局 +2；无原生 2 粮格 → 把空地基础地形改成产粮 ≥2 的地形
+    落点：候选按环排序，一环 2 份后按 |距×10−22| 重排、二环 3 份后按 |距×10−17| 降序重排；
+      绿洲 = 带稀有特征、粮 ≥2、总产出 ≥3、可长在陆地的 TerrainFeature（每起点 1 个）
+
+文明/城邦落位（assignRegions）
+    startBias 分桶：无偏好 → Random；Avoid [] → Negative；Coast → Coastal；其他 → Positive
+    处理顺序：Coastal（海→湖淡水→河→河邻）→ Positive（单偏好先挑，挑不到进兜底）
+      → PositiveFallback（取同类地形最多的区域）→ Negative（避开的×2 − 想要的）→ Random（stateBasedRandom）
+    MinorCivPlacer：按 城邦数/区域数 比值分；无人大陆（≥4 格且无区域）；
+      共享奢侈品区域；均匀补；肥沃度最低的区域接住剩余的；落位跳过 MinorCiv impact
+
+资源摆放（resourceplacement/）
+    impact（TileDataMap.placeImpact）：中心 99，向外 ringValue = radius−ring+1，
+      重叠取 max(旧,现今值)+2 封顶 50；半径：大文明起点 MinorCiv 6 / Luxury 3 / Strategic 0 / Bonus 3，
+      城邦起点 MinorCiv 4 / Luxury 3 / Strategic 0 / Bonus 3，自然奇观四种各 1
+    assignLuxuries：maxRegionsWithLuxury = 区域 &gt;14 →3、&gt;10 →2、否则 1；
+      可分配 = 非 Special placement、非 CityStateOnly；水域奢侈品要求区域 Coastal ≥12 且起点临海；
+      按 weight/(1+已分配数) 加权随机 → region.luxury；另预留 4 种城邦奢侈品
+    placeLuxuries 四批：大文明起点（至少 2 份，1..2 环每 2 格）→ 城邦起点（75% 先城邦专属）
+      → 区域本地产（≈ 地块数/600）→ 全图随机（≈ 地块数^0.45 × 设置%）→ 特殊（Marble）补足
+    placeStrategicAndBonuses：陆地大矿（地形 “Every [N] tiles”，默认 25）→ 城邦附近现代战略
+      → 陆地小矿（数量 = 陆地/(30×倍率)+1，权重 MinorDepositWeighting）→ 水域大矿
+      → 每文明保底（每种最多补 2）→ 奖励资源（“Generated on every [N] tiles” × 倍率）
+      → 起点三环奖励保底（区域 RegionExtraResource 时 2 份）
+    落笔 MapRegionResources：placeResourcesInTiles（数量 = size/frequency+1，先避 impact，
+      不足再挑 impact 最小）；tryAddingResourceToTiles（按数量、可 ratio 隔格、可 respectImpacts）
+
+REPL 实测（Small 六边图、seed 42、4 大文明 + 4 城邦）
+    705 格 / 509 陆地 / 4 块区域（146·84·128·128，Hybrid·Plains·Hybrid·Grassland）
+    174 个资源格：14 种奢侈品、7 种奖励、6 种战略；常量与四张分数表逐格复算</code></pre><p>来源：<a href="../../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">MapRegions.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/mapregions/Region.kt">Region.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt">RegionStartFinder.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapGenTileData.kt">MapGenTileData.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt">StartNormalizer.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MinorCivPlacer.kt">MinorCivPlacer.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/LuxuryResourcePlacementLogic.kt">LuxuryResourcePlacementLogic.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/StrategicBonusResourcePlacementLogic.kt">StrategicBonusResourcePlacementLogic.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/MapRegionResources.kt">MapRegionResources.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">MapGenerator.kt</a></p></section>
+<section id="pathing"><h2>移动与寻路</h2><pre><code>一步的代价（MovementCost.getMovementCostBetweenAdjacentTiles L40，先命中先返回）
+    cannotMove / 上下船 / 敌方控制区 ZoC / 渡河 → 100f 哨兵（= 花光全部）
+    两端铁路 0.1（RoadStatus.Railroad.movement）
+    道路连接 0.5，研究机器（Machinery）后 1/3（civ.tech.movementSpeedOnRoads）
+    双倍移动 unique → 地形价 ×0.5；否则 to.lastTerrain.movementCost
+    原版代价：平地 1 / Hill·Forest·Jungle 2 / Marsh 3（查 lastTerrain：特征压过基础地形）
+
+可达图（getMovementToTilesAtPosition，"这回合能到哪"）
+    水波扩散：每格记最便宜累计价 + 来向（parent）
+    canPassThrough 过不去的格记满价（攻击寻路要选中敌格）
+    超预算的格钉在 usableMovement 仍可达（相邻格总能挤过去）
+    能过 ≠ 能停：canPassThrough 管借道、canMoveTo 管落脚
+
+跨回合路径（getShortestPath，按回合数优化、非移动点总和）
+    每轮从可达边缘长树（movementTreeParents），返回值只含每回合落点
+    直穿两丘 3 落点胜过绕平地 4 落点（测试 L74）
+    绕远铁路环线胜过直路——仅 A*（测试 L121）
+
+A* 引擎（PathingMap/PathingMapCache/AStarPathfinder，设置 useAStarPathfinding 切换）
+    缓存键 = 位置 + 余力 + 满力（PathingMapCacheKey），键变全弃
+    RouteNode 塞进一个 Long：tileIdx 20b / 邦交 3b / 移动力 9b×2 / turns 6b /
+      父格钟点 3b / canMoveTo 1b / damagingTiles 2b（最高位，宁绕远不掉血）
+    base-30 定点数（FixedPointMovement）：0.1 与 1/3 都精确，1.0 = bits 30
+    启发式 = aerialDistanceTo × 0.1（铁路价 = 物理下限，永不高估）
+
+REPL 实测（TestGame 六边形图 + G&K 规则集）
+    移动力 2：平地 19 格可达；一格丘陵 18 格（丘陵格钉价 2.0，其后那格无记录）
+    移动力 5 过两丘到达剩 1.0；移动力 3 返回落点 [(0,2),(0,3)]
+    PathfindingTests（参数化双算法）：108 过 6 跳过 0 失败</code></pre><p>来源：<a href="../../../core/src/com/unciv/logic/map/mapunit/movement/MovementCost.kt">MovementCost.kt</a> · <a href="../../../core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt">UnitMovement.kt</a> · <a href="../../../core/src/com/unciv/logic/map/PathingMap.kt">PathingMap.kt</a> · <a href="../../../core/src/com/unciv/logic/map/PathingMapCache.kt">PathingMapCache.kt</a> · <a href="../../../core/src/com/unciv/logic/map/PathingMapAStarPathfinder.kt">PathingMapAStarPathfinder.kt</a> · <a href="../../../core/src/com/unciv/logic/map/tile/RoadStatus.kt">RoadStatus.kt</a> · <a href="../../../tests/src/com/unciv/logic/map/PathfindingTests.kt">PathfindingTests.kt</a></p></section>
+<section id="sight"><h2>视野与迷雾</h2><pre><code>高度字段（Tile.setTerrainFeatures L976）
+    unitHeight = 各层 VisibilityElevation 之和（原版 Mountain +2 / Hill +1；偶现于其他地形）
+    tileHeight = unitHeight，若地形带 BlocksLineOfSightAtSameElevation（Forest/Jungle）再 +1
+    原版高度表：平地 0/0；平地+森林 0/1；丘陵 1/1；丘陵+森林 1/2；山 2/2
+
+视线算法（TileMap.getViewableTiles L490，forAttack 可换攻击口径）
+    脚下格必可见；从 1 环到 sight+1 环逐环扩张
+    环内每格：b = min(一环内已入账邻居的 maxHeightSeenToTile)
+              可见 = aUnitHeight ≥ b || cTile.tileHeight &gt; b
+              可打 = aUnitHeight ≥ b || cTile.unitHeight &gt; b
+              入账 maxHeightSeenToTile = max(cTileHeight, b)（被挡也传递）
+    第 sight+1 环只留 tileHeight &gt; aUnitHeight 的格（forAttack 时一刀切掉整环）
+    同一环格子不能互相借道（本环攒齐才入账）
+REPL 实测（TestGame 半径 5 六边形图 91 格、G&K 规则集）
+    平地视野 2：19 格；(3,0) 丘陵：20 格；(1,0) 森林挡二环：18 格
+    丘陵+森林 unitHeight 1 / tileHeight 2；canSeeMountainOverHill 山可见
+
+文明账本（Civilization.viewableTiles @Transient；CivInfoTransientCache）
+    updateViewableTiles 四路拼集：领土及邻格（ourTilesAndNeighboringTiles）
+      + 各单位视野（滤掉自家领土）+ 盟友城邦领土 + 间谍驻地一环；整表替换
+    拼完顺手：updateLastSeenImprovements（拍照）→ setExplored（记名单）
+      → makeCivilizationsMeet（初见建交）→ discoverNaturalWonders（首见奇观）
+    单位移动触发条件：新旧 viewableTiles 集合不等 且 不全在自家领土内
+    其他触发：回合开始（TurnManager L61）、城市扩张/吞并（updateOurTiles）、
+      destroy/gift（L946/966）、读档（GameInfo.updateCivilizationState L830）
+
+三态判定
+    isVisible(civ)（Tile.kt L308）= player.viewableTiles.contains(this) — 瞬时
+    isExplored(civ)（Tile.kt L316）= exploredBy.contains(civID) — 历史（进存档）
+    getShownImprovement（L390）：AI/观战读真值，人类读 lastSeenImprovement
+    新探索禁用 undo（setExplored 里 GUI.clearUndoCheckpoints）
+
+UI 侧（WorldTileGroup/TileGroup/TileGroupMap/WorldMapTileUpdater）
+    TileGroup update 三分支：未探索无邻居→整格隐藏；未探索有邻居→unexplored 底纹；
+      正常→11 层自刷（改良层读 lastSeenImprovement、overlay 层遮雾/亮/未探索）
+    TileGroupMap 把 11 类子层收成 12 个全图层 + 一个影子层（点击命中）
+    WorldScreen.update → mapHolder.updateTiles(civView) 全图重刷（各层早退撑性能）
+    视野外拆农场仍显示记忆值（Fog 中人类玩家读的是 lastSeenImprovement）</code></pre><p>来源：<a href="../../../core/src/com/unciv/logic/map/TileMap.kt">TileMap.kt</a> · <a href="../../../core/src/com/unciv/logic/map/tile/Tile.kt">Tile.kt</a> · <a href="../../../core/src/com/unciv/logic/civilization/transients/CivInfoTransientCache.kt">CivInfoTransientCache.kt</a> · <a href="../../../core/src/com/unciv/ui/components/tilegroups/TileGroup.kt">TileGroup.kt</a> · <a href="../../../core/src/com/unciv/ui/components/tilegroups/TileGroupMap.kt">TileGroupMap.kt</a> · <a href="../../../tests/src/com/unciv/logic/map/VisibilityTests.kt">VisibilityTests.kt</a></p></section>
+<section id="tests"><h2>测试</h2><table><thead><tr><th scope="col">测试</th><th scope="col">钉住什么</th></tr></thead><tbody><tr><td><code>zeroIndexed</code></td><td>中心格 (0,0) 的连续编号为 0</td></tr><tr><td><code>testMappingIsOneToOne</code></td><td>第 1～100 环每格编号落在本环号段且互不重复</td></tr><tr><td><code>testTileNeighborMappingIsNonConflicting</code></td><td>地块×邻居对的唯一索引不冲突（寻路位图用）</td></tr><tr><td><code>testHexCoordConversions</code></td><td>−2..2 范围内 of(x,y) 后分量原样保留</td></tr><tr><td><code>testHexCoordVector2SerDeser</code></td><td>HexCoord 与 Vector2 的 JSON 互相读回相等</td></tr><tr><td><code>testCanDeserializeVerboseVector2Format</code></td><td>旧存档的 Float 包装格式仍可读</td></tr><tr><td><code>testSerializedHexCoordIsCompact</code></td><td>序列化为紧凑格式 {"x":-42,"y":42}</td></tr><tr><td><code>testHexCoordFormatAndParseBack</code></td><td>toPrettyString → fromString 往返一致</td></tr></tbody></table><p>本地运行：<code>:tests:test --tests "com.unciv.logic.map.HexmathTests"</code>。课程核对（2026-09-10，Gradle MCP）：8 过 0 跳过 0 失败。</p></section>
+<section id="redblob"><h2>与 Red Blob 对照</h2><table><thead><tr><th scope="col">方面</th><th scope="col">Unciv</th><th scope="col">Red Blob 轴向坐标</th></tr></thead><tbody><tr><td>六边形摆放</td><td>平顶（正上正下有邻居）</td><td>平顶/尖顶按需，公式各自成系</td></tr><tr><td>屏幕 y 轴</td><td>向上</td><td>示意图中向下</td></tr><tr><td>坐标轴</td><td>两条斜轴（10、2 点钟）</td><td>一条水平 + 一条斜轴 (q, r)</td></tr><tr><td>距离</td><td>max(|Δx|, |Δy|, |Δ(y−x)|) 两分支</td><td>max(|Δq|, |Δr|, |Δq+Δr|)</td></tr></tbody></table><p>移植顺序：先对齐邻居偏移表（必要时旋转/镜像）→ 用手算距离核对公式 → 再移植范围/寻路 → 以仓库的 <code>hex2CubicCoords</code> 与 HexmathTests 为准。不能把 q、r 直接改名成 x、y。</p></section>
+<section id="sources"><h2>源码与资料</h2><p><a href="../../../core/src/com/unciv/logic/map/HexMath.kt">HexMath.kt</a> · <a href="../../../core/src/com/unciv/logic/map/NeighborDirection.kt">NeighborDirection.kt</a> · <a href="../../../core/src/com/unciv/logic/map/TileMap.kt">TileMap.kt</a> · <a href="../../../tests/src/com/unciv/logic/map/HexmathTests.kt">HexmathTests.kt</a> · <a href="../../../core/src/com/unciv/ui/screens/mapeditorscreen/EditorMapHolder.kt">EditorMapHolder.kt</a> · <a href="https://www.redblobgames.com/grids/hexagons/">Red Blob Games: Hexagonal Grids</a></p></section>
+<footer>核对：2026-09-17 · 第 05、06 课配套：坐标速查 + 地块存储与环绕速查；第 07 课正文：生成阶段与 seed 边界；第 08 课配套：噪声与地形分布速查；第 09 课配套：山地与河流速查；第 10 课配套：区域与资源速查；第 11 课配套：移动与寻路速查；第 12 课配套：视野与迷雾速查。</footer></main></div></body></html>

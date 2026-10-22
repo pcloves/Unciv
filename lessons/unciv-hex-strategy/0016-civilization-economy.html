@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>16 · 城市怎样进入文明账本 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>16 / 城市怎样进入文明账本</strong><a href="#goal">目标、回顾与场景</a><a href="#aggregate">1. 城市明细怎样汇总</a><a href="#upkeep">2. 维护费在哪里扣</a><a href="#happiness">3. 幸福度怎样反馈到城市</a><a href="#settlement">4. 何时真正改变国库</a><a href="#new-unit">5. 新单位的完整时间线</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 50～60 分钟<br>承接第 13～15 课<br>含源码走读与手算<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第三阶段 / 经济专题 · 文明收支</div>
+<h1>城市怎样进入文明账本</h1>
+<p class="lead">新单位刚训练完成，黄金的每回合收入减少了，国库却没有立即少钱。这两个读数并不矛盾：<strong>一个表示按当前局面计算的净流量，另一个保存已经结算和花费后的余额。</strong>本课从城市产出明细出发，追到文明汇总、维护费、幸福度反馈，再确认哪一行代码真正改变国库。</p>
+<p class="meta">源码基线：1df6249a41301056ddc4448a95a93ddf5403e061；核对日期：2026-09-24。数值场景采用 G&amp;K 规则、Prince 难度的人类文明。代码为真实源码的部分摘录，中文注释为教学所加；折行、省略和教学改写均在块内说明。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<div class="paired equal"><div><h3>读完要能做什么</h3><ul><li>从一个城市的最终明细追到文明黄金净流量，指出三类维护费各在哪里计算。</li><li>区分统计刷新、幸福度变化和国库入账，解释为何反复刷新不会反复收钱。</li><li>把上一课的新单位生成接到收支时间线上，手算生成前后两次国库结算。</li></ul></div><div><h3>把旧课接上来</h3><p><a href="0013-tile-yields.html#city">第 13 课</a>已经得到 <code>finalStatList</code> 和 <code>currentCityStats</code>；<a href="0014-population-growth.html#growth">第 14 课</a>把净粮食加到存粮；<a href="0015-production-construction.html#completion">第 15 课</a>说明普通生产在结束时加进度、下次本方开始时完成。</p><p>本课随读随回顾：城市每回合产出不是库存，生产进度达到成本也不等于单位已经存在。带着这两点直接往下看。</p></div></div>
+<p>下面使用两座城市。甲城每回合黄金收入为 8.5、建筑维护费为 2；乙城收入为 5.25、建筑维护费为 1。文明还维护一格费用为 1 的道路，拥有 4 个普通单位，国库为 100。没有贸易、全局黄金奖励、折扣或驻军免维护规则。甲城正在训练第 5 个单位，成本 40、进度 35，本次最终生产力 12.4。</p>
+<p>这是为手算而设置的教学场景，收入来自测试中创建的建筑。单位维护公式的游戏进度先固定为 0；两城人口、黄金来源和道路均保持不变。我们调用真实回合管理器验证，暂不推进整局回合数，避免把单位数量变化和时间增长混在一起。</p>
+<ol class="flow" aria-label="城市产出到国库的顺序"><li><strong>城市计算</strong><span>保存分来源的最终产出与建筑维护费。</span></li><li><strong>文明汇总</strong><span>合并各城明细，再加入单位、道路等文明收支。</span></li><li><strong>更新预测</strong><span>保存当前净流量；幸福度跨过规则边界时重算城市。</span></li><li><strong>回合结算</strong><span>文明结束回合时取黄金整数部分，调用 addGold。</span></li></ol>
+<p class="meta">建议时间：场景与回顾 5 分钟；第 1～2 节 12 分钟；第 3 节 10 分钟；第 4～5 节 12 分钟；心智模型与练习 12～15 分钟。折叠扩展与本地重跑可另选时间。</p>
+</section>
+
+<section id="aggregate"><h2>1. 文明读取城市的最终明细</h2>
+<p>先把几个相近的名字放在一起。下表按从城市到文明、从预测到存量的顺序排列。这里的“预测”指<strong>按当前状态计算、准备供下一次结算使用的值</strong>，没有模拟之后敌人会做什么，也不保证数值在结束回合前不再变化。</p>
+<table><thead><tr><th scope="col">读取位置</th><th scope="col">保存什么</th><th scope="col">本例中的含义</th></tr></thead><tbody>
+<tr><td><code>city.cityStats.finalStatList</code></td><td>城市按来源整理的最终 <code>Stats</code></td><td>甲城 Buildings 行 +8.5 金、Maintenance 行 −2 金</td></tr>
+<tr><td><code>city.cityStats.currentCityStats</code></td><td>同一份城市明细相加后的总值</td><td>甲城黄金净值为 6.5</td></tr>
+<tr><td><code>civ.stats.statsForNextTurn.gold</code></td><td>文明当前每回合黄金净流量，浮点数</td><td>汇总全局收支后为 9.75</td></tr>
+<tr><td><code>civ.gold</code></td><td>国库余额，整数；通过 <code>addGold</code> 修改</td><td>结算前仍为 100</td></tr>
+<tr><td><code>civ.getHappiness()</code></td><td>文明幸福度缓存，来自独立的幸福度明细</td><td>供增长、生产等规则条件读取；不是黄金余额</td></tr>
+</tbody></table>
+<h3>城市更新结束后，通知文明重新汇总</h3>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CityStats.update 的末尾；前面已计算城市各项来源。</span>
+<span class="comment">// ① 得到应用修正与消耗后的最终明细</span>
+updateFinalStatList(currentConstruction, calculateGrowthModifiers)
+
+val newCurrentCityStats = Stats()
+for (stat in finalStatList.values)
+    newCurrentCityStats.add(stat)      <span class="comment">// ② 合计各来源</span>
+currentCityStats = newCurrentCityStats <span class="comment">// ③ 替换城市总值</span>
+
+if (updateCivStats)
+    city.civ.updateStatsForNextTurn()  <span class="comment">// ④ 默认继续更新文明</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/CityStats.kt">本地 CityStats.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L485">update · L485</a></p></div><div>
+<p>① <code>updateFinalStatList</code> 完成城市层面的百分数修正、人口吃粮、建筑维护费等计算。文明接收的是这之后的数值。</p>
+<p>② 用新的 <code>Stats</code> 相加，得到城市总值。<code>Stats.add</code> 按黄金、粮食、生产等字段分别加，不会修改传入的来源对象。</p>
+<p>③ 替换 <code>currentCityStats</code>，供城市界面与城市结算读取。源码注释说明，采用新对象而不是原地修改，是为了减少遍历时发生并发问题。</p>
+<p>④ 参数 <code>updateCivStats</code> 默认为 <code>true</code>，因此普通城市更新会继续刷新文明预测。它也允许文明稍后反过来要求城市更新时，关闭这次回调。</p>
+</div></div>
+<h3>按来源合并，仍保留费用明细</h3>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// CivInfoStatsForNextTurn.getStatMapForNextTurn 的部分代码。</span>
+val statMap = StatMap()
+for (city in civInfo.cities) {
+    for (entry in city.cityStats.finalStatList)
+        statMap.add(entry.key, entry.value) <span class="comment">// ① 同名来源相加</span>
+}
+<span class="comment">// ……省略城邦盟友的百分比产出</span>
+<span class="comment">// ② 文明层的两类维护费</span>
+statMap["Transportation upkeep"] = getTransportationUpkeep() * -1
+statMap["Unit upkeep"] = Stats(gold = -getUnitMaintenance().toFloat())
+
+<span class="comment">// ……省略正幸福度转产出及国库赤字的科学惩罚</span>
+<span class="comment">// ③ 文明间每回合黄金贸易</span>
+val goldDifferenceFromTrade =
+    civInfo.diplomacy.values.sumOf { it.goldPerTurn() }
+if (goldDifferenceFromTrade != 0)
+    statMap["Trade"] = Stats(gold = goldDifferenceFromTrade.toFloat())
+
+for ((key, value) in getGlobalStatsFromUniques())
+    statMap.add(key, value)                 <span class="comment">// ④ 全局来源</span>
+return statMap</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt">本地 CivInfoStatsForNextTurn.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L174">getStatMapForNextTurn · L174</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/stats/Stats.kt#L282">StatMap.add · L282</a></p></div><div>
+<p>① 实际读取 <code>finalStatList</code>，不是再次累加 <code>currentCityStats</code>。<code>StatMap.add</code> 遇到新来源先复制，遇到同名来源再相加。本例 Buildings 行为 13.75 金，Maintenance 行为 −3 金。</p>
+<p>② 道路和单位的费用在文明层补入。前面已经合并过建筑维护费，这里没有再扣一次建筑费。</p>
+<p>③ 外交管理器给出净贸易黄金，非零时写入 Trade 行。城市中的 <code>Trade routes</code> 是城市与首都连接等收益，不能把这两个名字相近的来源当成同一笔交易。</p>
+<p>④ 最后加入政策、宗教、文明规则等全局来源。<code>getGlobalStatsFromUniques</code> 对通用 Stats 效果排除建筑和奇观来源，相关建筑产出已在城市计算。</p>
+</div></div>
+<p>本例没有第三、第四项额外黄金，所以先得到 <code>8.5 + 5.25 − 2 − 1 = 10.75</code>，再扣道路 1，单位维护费暂为 0，文明黄金净流量为 <strong>9.75</strong>。同一个 <code>Stats</code> 也能合计粮食与生产，但这不等于文明有一份共享粮仓或共享建造进度；它们仍由各城按第 14、15 课的路径结算。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L323">全局 Stats 的建筑来源过滤 · L323</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L435">城市来源含 Trade routes · L435</a></p>
+</section>
+
+<section id="upkeep"><h2>2. 维护费不是在每次刷新时直接扣国库</h2>
+<p>维护费先成为统计中的负数，等黄金净流量整体入账时体现为少收或净支出。下表按计算位置区分三类费用；不是按 UI 上可能显示的先后顺序排列。</p>
+<table><thead><tr><th scope="col">费用</th><th scope="col">计算入口与来源行</th><th scope="col">需要注意的规则</th></tr></thead><tbody>
+<tr><td>建筑维护费</td><td><code>CityConstructions.getMaintenanceCosts</code> → 城市 Maintenance 行</td><td>跳过免费建筑，应用匹配的维护费修正；城市层加上适用的 AI 修正后取整数。加入最终明细的位置在产出百分数修正之后。</td></tr>
+<tr><td>道路维护费</td><td><code>getTransportationUpkeep</code> → 文明 Transportation upkeep 行</td><td>检查所属城市地块，跳过城中心、没有完好道路的格和规则免维护的格；另处理本文明负责的中立道路。按道路规则读取费用，并应用维护费修正。</td></tr>
+<tr><td>单位维护费</td><td><code>getUnitMaintenance</code> → 文明 Unit upkeep 行</td><td>按单位集合、免费名额、折扣、游戏进度和 AI 修正计算，再向零截断为整数。</td></tr>
+</tbody></table>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L130">建筑费用 · L130</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L594">城市写入 Maintenance · L594</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L90">道路维护费 · L90</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/android/assets/jsons/Civ%20V%20-%20Gods%20%26%20Kings/TileImprovements.json#L109">G&amp;K 道路每回合费用 · L109</a></p>
+<h3>为什么第 4 个单位可以不增加整数费用，第 5 个却增加了</h3>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// getUnitMaintenance 的部分代码，保留原顺序并折行。</span>
+val baseUnitCost = 0.5f
+var freeUnits = 3                          <span class="comment">// ① 默认免费名额</span>
+for (unique in civInfo.getMatchingUniques(
+        UniqueType.FreeUnits, civInfo.state)) {
+    freeUnits += unique.params[0].toInt()
+}
+<span class="comment">// ② 省略：按免维护条件过滤单位；为每个剩余单位</span>
+<span class="comment">// 从 1f 开始依次乘适用的折扣，放入 costsToPay。</span>
+
+costsToPay.sortDescending()                <span class="comment">// ③ 优先免掉较贵的</span>
+val numberOfUnitsToPayFor = max(0.0,
+    costsToPay.asSequence().drop(freeUnits)
+        .sumOf { it.toDouble() }).toFloat()
+
+<span class="comment">// ④ 时间越往后，费用公式越高；进度最多取 1</span>
+val turnLimit = civInfo.gameInfo.speed.numTotalTurns().toFloat()
+val gameProgress = min(civInfo.gameInfo.turns / turnLimit, 1f)
+var cost = baseUnitCost * numberOfUnitsToPayFor * (1 + gameProgress)
+cost = cost.pow(1 + gameProgress / 3)
+
+if (!civInfo.isHuman())                    <span class="comment">// ⑤ AI 修正与取整</span>
+    cost *= civInfo.gameInfo.getDifficulty().aiUnitMaintenanceModifier
+return cost.toInt()</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L35">getUnitMaintenance · L35</a></p></div><div>
+<p>① 默认有 3 个免费名额，规则可以增加它。不能用“单位总数 × 单位固定价格”代替这个方法。</p>
+<p>② 每个单位从 1 的费用权重开始，再乘适用折扣。有驻军免维护规则时，先排除能驻军且位于城中心的单位；普通例子没有这些特例。这里遍历的是文明单位集合，并非只筛军事单位。</p>
+<p>③ 排序后去掉最贵的若干项，再合计剩余权重。因此 <code>numberOfUnitsToPayFor</code> 可以是小数，不一定是单位个数。本例没有折扣，4 个单位只剩 1 的权重。</p>
+<p>④ 设进度为 0，公式退化为 <code>0.5 × 剩余权重</code>。真实对局推进后，即使单位数不变，费用也可能上升。</p>
+<p>⑤ 人类文明跳过 AI 修正，最后 <code>toInt()</code>。第 4 个单位算出 0.5，整数费用仍为 0；第 5 个算出 1，费用变为 1。</p>
+</div></div>
+<p>下表固定进度为 0、无折扣且都是人类单位，只改变单位总数。最后一列才是写入文明明细时使用的费用绝对值。</p>
+<table id="maintenance-values"><thead><tr><th scope="col">单位总数</th><th scope="col">去掉 3 个名额后的权重</th><th scope="col">取整前费用</th><th scope="col">实际计入的费用</th></tr></thead><tbody>
+<tr><td>3</td><td>0</td><td>0</td><td>0</td></tr><tr><td>4</td><td>1</td><td>0.5</td><td>0</td></tr><tr><td>5</td><td>2</td><td>1</td><td>1</td></tr><tr><td>6</td><td>3</td><td>1.5</td><td>1</td></tr><tr><td>7</td><td>4</td><td>2</td><td>2</td></tr>
+</tbody></table>
+<p>所以，“新单位会参与维护费计算”不等于“每建成一个单位，马上多扣 1 金”。本例从 4 个到 5 个恰好跨过整数边界；从 5 个到 6 个则没有。另一个已验证的读数：7 个单位、游戏进度为 1 时，<code>(0.5 × 4 × 2)^(1 + 1/3) ≈ 6.35</code>，计入费用为 6。</p>
+<details><summary>单位维护费与单位供给不足，是两条不同的影响</summary><p><code>getUnitSupply</code> 根据难度、城市数量、人口和规则计算可供给数量。<code>getUnitSupplyDeficit</code> 计算超出的单位数，生产力惩罚为每超出一个 −10%，最多 −70%，进入城市的 Unit Supply 百分比来源。它不是刚才那 3 个免维护名额，也不直接等于黄金费用。本例未超过供给上限，因此只追踪黄金变化；若追查生产力下降，要另看城市统计是否已更新并计入供给惩罚。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L135">单位供给与生产惩罚 · L135</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L459">城市百分比来源 · L459</a></p></details>
+</section>
+
+<section id="happiness"><h2>3. 幸福度先汇总，再反馈到城市</h2>
+<p>文明幸福度不能直接取所有城市 <code>currentCityStats.happiness</code> 相加。城市数量、人口造成的不满与难度基础幸福度等另有来源。代码通过 <code>getHappinessBreakdown</code> 单独汇总，然后把结果存到 <code>stats.happiness</code>。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// getHappinessBreakdown 的部分代码。</span>
+val statMap = HashMap&lt;String, Float&gt;()
+statMap["Base happiness"] =
+    civInfo.getDifficulty().baseHappiness.toFloat() <span class="comment">// ① 难度基础值</span>
+
+<span class="comment">// ② 省略：奢侈品、城邦奢侈品与保留交易幸福度的规则。</span>
+
+for (city in civInfo.cities) {
+    <span class="comment">// ③ 合并城市专门的幸福度明细</span>
+    for ((key, value) in city.cityStats.happinessList.toList())
+        statMap[key] = value + (statMap[key] ?: 0f)
+}
+<span class="comment">// ……省略道路规则可能产生的幸福度维护费</span>
+for ((key, value) in getGlobalStatsFromUniques())
+    statMap[key] = value.happiness + (statMap[key] ?: 0f) <span class="comment">// ④ 全局效果</span>
+return statMap</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L232">getHappinessBreakdown · L232</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L374">城市幸福度明细 · L374</a></p></div><div>
+<p>① 文明先取得难度提供的基础幸福度。本课 Prince 人类文明为 9。</p>
+<p>② 奢侈品供应等在文明层计算。本节先固定为没有这些来源，资源供应的取得留到第 17 课。</p>
+<p>③ 城市 <code>happinessList</code> 包含城市数量、人口、建筑、地块和其他规则效果。未占领、无修正的 Prince 人类城市每城为 −3，每人口为 −1；两座人口各 1 的城市合计 −8。</p>
+<p>④ 再合并全局效果中的幸福度字段。本例若无额外来源，幸福度为 <code>9 − 6 − 2 = 1</code>。其他难度、占领状态和规则不能照搬这一组数字。</p>
+</div></div>
+<h3>跨过规则边界，为什么能让其他城市一起变</h3>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// Civilization.updateStatsForNextTurn：方法体，省略计时包装。</span>
+val previousHappiness = stats.happiness          <span class="comment">// ① 保留旧值</span>
+stats.happiness =
+    stats.getHappinessBreakdown().values.sum().roundToInt()
+
+<span class="comment">// ② 比较新旧值是否位于某个阈值的不同侧</span>
+if (stats.happiness != previousHappiness
+    &amp;&amp; gameInfo.ruleset.allHappinessLevelsThatAffectUniques.any {
+        stats.happiness &lt; it != previousHappiness &lt; it
+    })
+    for (city in cities)
+        city.cityStats.update(updateCivStats = false) <span class="comment">// ③ 重算城市</span>
+
+val statMapForNextTurn = stats.getStatMapForNextTurn() <span class="comment">// ④ 再汇总</span>
+val newStats = Stats()
+for (stats in statMapForNextTurn.values) newStats.add(stats)
+stats.statsForNextTurn = newStats                    <span class="comment">// ⑤ 替换预测</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/civilization/Civilization.kt">本地 Civilization.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/Civilization.kt#L479">updateStatsForNextTurn · L479</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Ruleset.kt#L169">规则集收集幸福度阈值 · L169</a></p></div><div>
+<p>① 先保存旧幸福度，再合计新明细并 <code>roundToInt()</code>。<code>getHappiness()</code> 返回的就是这个整数缓存。</p>
+<p>② 这行 Kotlin 可按 <code>(新值 &lt; 阈值) != (旧值 &lt; 阈值)</code> 理解。阈值由规则条件收集而来；例如从 0 到 −1，位于 0 的哪一侧发生了变化。</p>
+<p>③ 有边界变化时更新所有城市，让它们读取新的文明幸福度。传 <code>false</code> 可避免城市再次调用文明更新，形成来回递归。</p>
+<p>④ 在需要的城市重算之后，再按上一节的方法合并最终明细。</p>
+<p>⑤ 创建新 <code>Stats</code> 并替换预测对象；这里没有调用 <code>addGold</code>，国库不变。</p>
+</div></div>
+<p class="callout"><strong>这个刷新不是无条件重算所有城市。</strong>如果幸福度没有跨过规则边界，文明方法直接读取现有城市明细。直接改地块或建筑字段后，只调用文明更新，不保证城市明细已反映变化。排查收入问题时，应先看城市的 <code>finalStatList</code> 是否更新，再看文明汇总，而不能把“刷文明预测”当成“从地图重新计算一切”。</p>
+<h3>当前规则到底怎样影响增长与生产</h3>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// G&amp;K / GlobalUniques.json 的三条规则。</span>
+<span class="comment">// 为配对阅读而拆行，去掉 JSON 外层引号与逗号；不是可直接粘贴的 JSON。</span>
+<span class="comment">// ① 幸福度在 -10 到 -1，含两端</span>
+[-75]% growth [in all cities]
+    &lt;when between [-10] and [-1] [Happiness]&gt;
+
+<span class="comment">// ② 严格低于 -10</span>
+Nullifies Growth [in all cities]
+    &lt;when below [-10] [Happiness]&gt;
+
+<span class="comment">// ③ 同一条件下生产力减少</span>
+[-50]% [Production] [in all cities]
+    &lt;when below [-10] [Happiness]&gt;</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/android/assets/jsons/Civ%20V%20-%20Gods%20%26%20Kings/GlobalUniques.json#L5">G&amp;K 幸福度规则 · L5</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unique/Conditionals.kt#L134">below 与 between 的判定 · L134</a></p></div><div>
+<p>① <code>between</code> 含两端，所以 −10 仍适用 −75% 增长。增长修正作用于人口吃粮后的正粮食结余，不是把地块的所有粮食产出减掉 75%。</p>
+<p>② <code>below</code> 是严格小于。−11 才落入这里；城市把正增长抵消到 0。它不会免除负粮食导致的饥饿。</p>
+<p>③ 低于 −10 时，还会应用 −50% 生产力修正。增长惩罚和生产惩罚是两条规则，不能把“幸福度为负”一概解释成生产减半。</p>
+</div></div>
+<p>下面另设一组幸福度场景：两城各有 8 点修正前正粮食结余、10 点修正前生产力，没有其他增长或生产加成，不训练会把粮食转成生产力的项目。只改变甲城建筑提供的幸福度，再调用甲城 <code>cityStats.update()</code>；实测乙城也在跨阈值时得到对应结果。</p>
+<table id="happiness-values"><thead><tr><th scope="col">文明幸福度</th><th scope="col">每城最终净粮食</th><th scope="col">每城最终生产力</th><th scope="col">原因</th></tr></thead><tbody>
+<tr><td>0</td><td>8</td><td>10</td><td>上述惩罚都不生效</td></tr>
+<tr><td>−1</td><td>8 − 8 × 75% = 2</td><td>10</td><td>只有增长减少</td></tr>
+<tr><td>−10</td><td>2</td><td>10</td><td>仍在含两端的增长区间</td></tr>
+<tr><td>−11</td><td>0</td><td>10 × 50% = 5</td><td>停止正增长，同时减少生产力</td></tr>
+<tr><td>恢复到 0</td><td>8</td><td>10</td><td>跨回边界，重新计算后恢复</td></tr>
+</tbody></table>
+<p>这条反馈会影响第 14 课的存粮增长，以及第 15 课下一次投入项目的生产力；它不会倒扣已经存下的生产进度。本节每次都只刷新统计，因此国库始终不变。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L159">增长加成转为粮食差额 · L159</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L571">吃粮后应用增长修正 · L571</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L602">只抵消正增长 · L602</a></p>
+<details><summary>正幸福度与黄金时代：还有一份真正累积的数值</summary><p><code>GoldenAgeManager.storedHappiness</code> 与 <code>civ.getHappiness()</code> 是两个数。未处于黄金时代时，<code>endTurn(happiness)</code> 把当前幸福度加到 <code>storedHappiness</code>，最低截到 0；负幸福度会减少已有积累。超过所需阈值后进入黄金时代。处于黄金时代时，管理器减少剩余持续回合，不继续按这条路径积累幸福度。</p><p>文明在城市结束处理之后才调用这个管理器。进入黄金时代会更新城市统计，当前实现提供生产力与文化加成；这是后续统计变化，不能回头再给刚刚结算过的黄金或建造进度加一次。某些政策还可将正幸福度按规则转成全局产出，也不是所有文明默认享有。既有 GoldenAgeManagerTest 验证了积累、减少、不低于零和持续时间等行为。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/GoldenAgeManager.kt#L53">进入与推进黄金时代 · L53</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L239">城市黄金时代加成 · L239</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L203">正幸福度按规则转产出 · L203</a></p></details>
+</section>
+
+<section id="settlement"><h2>4. 文明回合结束时，净流量才进入国库</h2>
+<p>现在回到第 01 课的 <code>TurnManager.endTurn</code>。它在触发回合结束效果、整理通知并排除已灭亡或观战文明后，进入经济结算。这里要跟踪的是<strong>本次结算实际取用的局部变量</strong>，而不只是界面最后显示的预测。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// TurnManager.endTurn 的部分代码；中间省略处保持原顺序。</span>
+var nextTurnStats =
+    if (civInfo.isBarbarian) Stats()
+    else {
+        civInfo.updateStatsForNextTurn()        <span class="comment">// ① 结算前再刷新</span>
+        civInfo.stats.statsForNextTurn
+    }
+<span class="comment">// ……省略文化与城邦事务</span>
+<span class="comment">// ② 省略严重赤字分支：解散单位后，</span>
+<span class="comment">// nextTurnStats 会重新指向更新后的文明统计。</span>
+
+civInfo.addGold(nextTurnStats.gold.toInt())      <span class="comment">// ③ 黄金实际入账</span>
+<span class="comment">// ……随后处理科技、信仰、间谍与伟人点数</span>
+for (city in civInfo.cities.sortedByDescending { it.isBeingRazed }) {
+    progressBar?.increment()
+    CityTurnManager(city).endTurn()             <span class="comment">// ④ 再结束城市回合</span>
+}
+civInfo.temporaryUniques.endTurn()
+civInfo.goldenAges.endTurn(civInfo.getHappiness()) <span class="comment">// ⑤ 随后推进黄金时代</span>
+<span class="comment">// ……后面还有单位与外交的结束处理</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/civilization/managers/TurnManager.kt">本地 TurnManager.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L275">结束结算顺序 · L275</a></p></div><div>
+<p>① 普通文明先刷新，再取当前预测对象。刚进入本方行动阶段时看到的数字，可能已经被之后的建造、贸易、单位变化改写；这里重新读取。</p>
+<p>② 若进入严重赤字解散单位的分支，单位移除会更新维护费，局部变量也会改取新统计。本例国库为正，不进入此分支。</p>
+<p>③ 文明黄金总净流量先 <code>toInt()</code>，再交给 <code>addGold</code>。9.75 变成 9；−2.75 变成 −2。没有保存小数尾数供下一次凑整。</p>
+<p>④ 黄金入账后才开始各城结束处理，包括生产进度累加和人口增长。若城市此时增长并改变统计，不会回头补算本次已经入账的黄金。</p>
+<p>⑤ 接着处理临时规则和黄金时代。随后还有单位、外交等阶段，所以方法结束后的预测读数不一定等于刚才入账使用的数值。</p>
+</div></div>
+<p class="callout"><strong>与上一课比较取整位置：</strong>普通生产是城市最终生产力 <code>roundToInt()</code>，12.4 → 12、9.5 → 10；黄金则把文明总净流量 <code>toInt()</code>，9.75 → 9、−2.75 → −2。黄金不是每个城市分别取整后再相加。不过，建筑和单位维护费在各自的计算阶段已经有取整，不能把所有费用都拖到最后统一处理。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// Civilization.addGold 完整方法，调整折行。</span>
+fun addGold(delta: Int) {                         <span class="comment">// ① 整数变化量</span>
+    gold = when {
+        delta &gt; 0 &amp;&amp; gold &gt; Int.MAX_VALUE - delta -&gt;
+            Int.MAX_VALUE                       <span class="comment">// ② 防止上溢</span>
+        delta &lt; 0 &amp;&amp; gold &lt; Int.MIN_VALUE - delta -&gt;
+            Int.MIN_VALUE                       <span class="comment">// ③ 防止下溢</span>
+        else -&gt; gold + delta                    <span class="comment">// ④ 正常加到余额</span>
+    }
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/Civilization.kt#L1030">addGold · L1030</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/Civilization.kt#L146">gold 的私有 setter · L146</a></p></div><div>
+<p>① 参数可以为正，也可以为负。<code>gold</code> 可以公开读取，但 setter 是私有的，外部通过这个方法修改。</p>
+<p>② 增加过大的数值时，封顶到整数上限，避免溢出成负数。</p>
+<p>③ 减少过大的数值时，封底到整数下限。这里保护的是整数范围，并没有把负国库截成 0。</p>
+<p>④ 一般情况就是 <code>gold + delta</code>。本例 100 + 9 = 109；若余额 1、净流量 −2.75，则本次变为 1 − 2 = −1。</p>
+</div></div>
+<p>顶栏也明确读取两个字段：<code>goldLabel</code> 读取 <code>civInfo.gold</code>，<code>goldPerTurnLabel</code> 读取 <code>statsForNextTurn.gold</code>。UI 展示不会调用 <code>addGold</code>。购买、出售、掠夺等一次性黄金变化还有各自调用路径，所以“本节的每回合收支在结束时结算”不代表国库只允许在结束回合时变化。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/topbar/WorldScreenTopBarStats.kt#L124">顶栏分开读取余额与净流量 · L124</a></p>
+<details id="deficit"><summary>扩展：负净流量、负国库与强制解散单位，不是同一个条件</summary><p><code>getStatMapForNextTurn</code> 在道路、单位等费用之后检查：当时已汇总的黄金净值小于 0，且当前国库 <code>gold &lt; 0</code>，才加入 Treasury deficit 科学负值。差额为 <code>max(当时的黄金净值, 1 − 当时的科学总值)</code>，目的是让该步处理后的科学至少保留 1。注意源码顺序：<strong>这项检查在 Trade 和全局规则来源加入之前</strong>，不能简单改述为“最终顶栏净收入为负就扣科学”。</p><p>无贸易和其他全局效果时，净黄金 −2.75、科学 10、国库 1，不扣科学；先结算黄金后国库成为 −1，下一次刷新才算出科学 7.25。若每回合赤字扩大到 −29.75，则该步科学降至 1。这些数字已用真实方法验证。</p><p>强制解散单位是另一个分支，位于黄金入账之前：<code>gold &lt;= −200</code> 且 <code>nextTurnStats.gold.toInt() &lt; 0</code>，才循环选择军事单位解散，直到条件不满足或无军事单位可解散。因为判断在本次入账前，若本次扣款才让国库跌过 −200，不会在刚才已经经过的位置立刻再判一遍。本课不展开解散退款与排序细节。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L211">国库赤字影响科学 · L211</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L297">严重赤字解散单位 · L297</a></p></details>
+</section>
+
+<section id="new-unit"><h2>5. 新单位何时影响预测，何时影响国库</h2>
+<p>第 15 课已经追到 <code>BaseUnit.construct → UnitManager.addUnit → TileMap.placeUnitNearTile</code>。本课继续读放置方法的末尾：新单位成功放到地图后，就会要求文明刷新统计。</p>
+<div class="paired" data-pair-check><div><pre><code><span class="comment">// TileMap.placeUnitNearTile 的部分代码。</span>
+<span class="comment">// 前面已创建并临时登记单位、搜索合法位置。</span>
+if (unitToPlaceTile == null) {
+    civInfo.units.removeUnit(unit, updateCivInfo = false)
+    return null                                 <span class="comment">// ① 失败则撤销登记</span>
+}
+unit.putInTile(unitToPlaceTile)                  <span class="comment">// ② 成功放置</span>
+unit.currentMovement = unit.getMaxMovement().toFloat()
+unit.addMovementMemory()
+<span class="comment">// ……省略初始晋升</span>
+civInfo.updateStatsForNextTurn()                 <span class="comment">// ③ 刷新维护费预测</span>
+
+if (unit.getResourceRequirementsPerTurn().isNotEmpty())
+    civInfo.cache.updateCivResources()           <span class="comment">// ④ 有需要再刷资源</span>
+return unit</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L730">成功与失败后的处理 · L730</a></p></div><div>
+<p>① 若找不到位置，移除临时登记的单位并返回失败，不会留下一个新增单位来持续计费。上一课说明了此时建造进度与队首会保留。</p>
+<p>② 成功后单位已属于文明单位集合，并被放入地块。普通训练的新单位在本方开始阶段走到这里。</p>
+<p>③ <code>getUnitMaintenance</code> 再读集合时已经能看到它，因此黄金预测此时就更新。这里没有黄金入账调用，也没有提前扣一笔“本回合维护费”。</p>
+<p>④ 若单位有每回合资源需求，还会刷新资源供应；这是第 17 课要继续追的链。本例使用无这类需求的测试单位。</p>
+</div></div>
+<p>文明 <code>startTurn</code> 在城市开始前先做过一次统计刷新；那次还看不到尚未生成的新单位。随后城市完成建造，放置方法再次刷新，城市开始逻辑还会重新分配人口或更新城市统计。因此，“预测在回合开始刷新”只说对了一部分：<strong>它可以在同一回合的多个状态变化点被刷新。</strong></p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L39">文明开始时的初次刷新 · L39</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityTurnManager.kt#L23">城市完成检查与后续更新 · L23</a></p>
+<h3>把 35 → 47 → 新单位接到黄金时间线上</h3>
+<p>每行表示该阶段完成后的读数。单位费列是费用的正数绝对值，写入统计时会取负；国库列则是已经保存的余额。仍固定维护费公式进度为 0，无额外事件；其他文明阶段只用于标明普通游戏的顺序，教学测试不模拟敌方行动。</p>
+<div class="table-wrap wide" tabindex="0" role="region" aria-label="新单位与文明收支各阶段状态，窄屏可横向滚动">
+<table id="economy-states"><thead><tr><th scope="col">阶段</th><th scope="col">新单位状态</th><th scope="col">单位总数</th><th scope="col">单位费</th><th scope="col">黄金净流量</th><th scope="col">国库</th></tr></thead><tbody>
+<tr><td>本方结束前，反复刷新预测</td><td>进度 35 / 40</td><td>4</td><td>0</td><td>13.75 − 3 − 1 = 9.75</td><td>100</td></tr>
+<tr><td>文明结束：黄金已入账，随后城市加生产</td><td>35 + round(12.4) = 47，尚未生成</td><td>4</td><td>0</td><td>9.75</td><td>100 + 9 = 109</td></tr>
+<tr><td>其他文明行动期间，假定无相关变化</td><td>仍未生成</td><td>4</td><td>0</td><td>9.75</td><td>109</td></tr>
+<tr><td>下次本方开始，成功生成并刷新统计</td><td>单位出现，保存 7 点生产溢出</td><td>5</td><td>1</td><td>13.75 − 3 − 1 − 1 = 8.75</td><td>109</td></tr>
+<tr><td>本方行动期间，无额外收支变化</td><td>可控制新单位</td><td>5</td><td>1</td><td>8.75</td><td>109</td></tr>
+<tr><td>本方这次回合结束</td><td>仍存在并参与计费</td><td>5</td><td>1</td><td>8.75</td><td>109 + 8 = 117</td></tr>
+</tbody></table></div>
+<p><strong>真正的联系是：单位生成 → 单位集合改变 → 维护费重算 → 净流量预测改变 → 后续结束结算使用当时的净流量。</strong>本例新单位没有影响上一次已经得到的 9 金，而是让下一次结算从预计 9 金变为 8 金。若它在这次结束前被移除，<code>UnitManager.removeUnit</code> 默认又会刷新统计，结算时应使用新的读数；不能把生成时的预测当成已锁定的账单。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/UnitManager.kt#L176">移除单位也刷新维护费 · L176</a></p>
+<aside class="callout"><strong>Godot tip：把收支预览和实际余额分开</strong><p>做城池经营或门派经营时，可以让费用预览从当前城市、建筑和人员状态计算，让固定结算阶段修改余额。这样 UI 多次请求刷新，不会重复收取薪资或税金。若采用即时制，应明确按哪个时间步、怎样保留小数结余；Unciv 的整数回合入账规则需要重新设计。这里讨论数据与结算职责，不要求实现 Godot 工程，也不依赖某个节点回调来保证结算只执行一次。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul>
+<li><strong>文明按来源合并各城的 finalStatList。</strong>城市已经计算过的建筑维护费随明细进入，单位和道路等费用再在文明层加入。</li>
+<li><strong>statsForNextTurn 是当前预测，gold 是实际余额。</strong>重复刷新只替换统计对象；每回合黄金通过结束阶段的 <code>addGold</code> 入账。</li>
+<li><strong>单位费看数量、免费名额、折扣和时间，再取整数。</strong>新增单位参与计算，但不保证整数费用立即上升。</li>
+<li><strong>幸福度单独汇总，跨规则边界时重算城市。</strong>增长与生产受到的影响由当前规则和条件决定，不能只套用“负幸福度”一个判断。</li>
+<li><strong>先结算文明黄金，再推进城市生产与人口。</strong>普通新单位下次开始时生成，刷新未来收支，后续结束时才按当时净值影响国库。</li>
+</ul></section>
+
+<section id="practice"><h2>检索与推演</h2>
+<p>先不看正文作答。选择题允许重试，每个错误选项都有对应解释；再用练习 A、B 把字段、数字和时序接起来。回顾旧课是练习的一部分，可以在需要时回看。</p>
+<noscript><p>浏览器未启用 JavaScript，请展开“选择题答案与核对位置”自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. 国库为 100，黄金净流量为 9.75。没有状态变化，连续调用三次 updateStatsForNextTurn，结果是什么？</legend>
+<label class="option"><input required type="radio" name="q1" value="a" data-feedback="刷新方法没有调用 addGold，不会每调用一次就收取 9 金。"><span>国库变成 127，三次刷新各入账 9。</span></label>
+<label class="option"><input type="radio" name="q1" value="b" data-feedback="方法重新汇总并替换预测，国库仍为 100。普通每回合收支要等文明结束阶段调用 addGold。"><span>国库仍为 100，预测仍为 9.75。</span></label>
+<label class="option"><input type="radio" name="q1" value="c" data-feedback="9.75 是净流量，不能覆盖已有国库。gold 和 statsForNextTurn.gold 是两个字段。"><span>国库被新的净流量覆盖，变成 9。</span></label>
+<label class="option"><input type="radio" name="q1" value="d" data-feedback="刷新会把各城市和文明来源相加得到新 Stats，不是在旧预测上重复累加。"><span>国库不变，但净流量累加成 29.25。</span></label>
+</fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>2. 本例从 4 个普通单位增加到 5 个，发生在下次本方开始时。游戏进度为 0，无折扣；上次入账后国库为 109。生成并刷新之后，结果是什么？</legend>
+<label class="option"><input required type="radio" name="q2" value="a" data-feedback="维护费先进入预测。单位放置后的刷新没有调用 addGold，因此不会当场从 109 扣到 108。"><span>维护费变为 1，国库立即降到 108。</span></label>
+<label class="option"><input type="radio" name="q2" value="b" data-feedback="placeUnitNearTile 成功后就调用 updateStatsForNextTurn，预测不必等到结束阶段才刷新。"><span>维护费预测仍为 0，结束回合才首次看到新单位。</span></label>
+<label class="option"><input type="radio" name="q2" value="c" data-feedback="默认先去掉 3 个免费名额。5 个普通单位在进度为 0 时费用是 0.5 × 2 = 1。"><span>5 个单位每个收费 1，维护费变为 5。</span></label>
+<label class="option"><input type="radio" name="q2" value="d" data-feedback="费用由 0 变为 1，净流量由 9.75 变为 8.75；只是刷新预测，国库仍为 109。"><span>维护费变为 1，净流量变为 8.75，国库仍为 109。</span></label>
+</fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>3. 当前 G&amp;K 规则下，文明幸福度为 −10。城市原有 8 点正粮食结余、10 点生产力，没有其他修正或粮食转生产。最终是多少？</legend>
+<label class="option"><input required type="radio" name="q3" value="a" data-feedback="between 的 −10 到 −1 包含两端；−10 时增长减少 75%，8 变 2。生产减半要求严格低于 −10，所以仍为 10。"><span>净粮食 2，生产力 10。</span></label>
+<label class="option"><input type="radio" name="q3" value="b" data-feedback="停止正增长与生产减半要求 happiness &lt; −10。−10 没有进入这两个条件。"><span>净粮食 0，生产力 5。</span></label>
+<label class="option"><input type="radio" name="q3" value="c" data-feedback="−10 仍适用增长减少 75%，不能保留全部 8 粮。"><span>净粮食 8，生产力 10。</span></label>
+<label class="option"><input type="radio" name="q3" value="d" data-feedback="增长惩罚与生产惩罚是不同规则；不能把负幸福度一概当成生产减半。"><span>净粮食 2，生产力 5。</span></label>
+</fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>4. 结算前国库为 1，本次实际采用的黄金净流量为 −2.75。没有额外事件，也未进入强制解散分支。执行本次黄金入账后，国库是多少？</legend>
+<label class="option"><input required type="radio" name="q4" value="a" data-feedback="黄金使用 toInt() 向零截断，−2.75 变 −2；不能按向下取整或四舍五入变成 −3。"><span>−2，因为本次扣 3。</span></label>
+<label class="option"><input type="radio" name="q4" value="b" data-feedback="addGold 只保护整数上下界，没有把国库限制为非负。"><span>0，因为国库最低为 0。</span></label>
+<label class="option"><input type="radio" name="q4" value="c" data-feedback="(−2.75).toInt() 为 −2，1 + (−2) = −1；负国库是允许的。"><span>−1，因为本次扣 2。</span></label>
+<label class="option"><input type="radio" name="q4" value="d" data-feedback="gold 是整数，本次调用前净流量已转换成 Int，不会把 −1.75 存进国库。"><span>−1.75，保留本次小数。</span></label>
+</fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric" id="quiz-answers"><summary>选择题答案与核对位置</summary><ol><li><strong>B：</strong>国库仍为 100，预测仍为 9.75。见 <a href="#happiness">文明刷新方法</a>，末尾只替换统计。</li><li><strong>D：</strong>维护费变为 1，净流量变为 8.75，国库仍为 109。见 <a href="#economy-states">新单位状态表</a>。</li><li><strong>A：</strong>净粮食 2，生产力 10。见 <a href="#happiness-values">幸福度边界表</a>，−10 仍在增长减少区间内。</li><li><strong>C：</strong>国库为 −1，<code>1 + (−2.75).toInt() = −1</code>。见 <a href="#settlement">黄金实际入账</a>。</li></ol></details>
+<h3>练习 A · 把两次结算与单位生成排在一起（6 分钟）</h3>
+<p>改用另一组数：两城黄金收入合计 16.5，建筑维护费合计 4，道路费 1，国库 50；目前有 5 个普通单位，第 6 个单位将在下次本方开始时生成。人类、游戏进度 0、免费名额 3、无折扣，其他数值不变。写出本次结束前、本次结束后、下次开始生成后、随后结束后的单位费、净流量与国库。为什么第 6 个单位出现后，整数费用没有增加？</p>
+<details class="rubric"><summary>展开推演结果</summary><table id="exercise-values"><thead><tr><th scope="col">时点</th><th scope="col">单位费</th><th scope="col">黄金净流量</th><th scope="col">国库</th></tr></thead><tbody><tr><td>本次结束前</td><td>1</td><td>16.5 − 4 − 1 − 1 = 10.5</td><td>50</td></tr><tr><td>本次结束后</td><td>1</td><td>10.5</td><td>50 + 10 = 60</td></tr><tr><td>下次开始，第 6 个单位生成后</td><td>1</td><td>10.5</td><td>60</td></tr><tr><td>随后本方结束后</td><td>1</td><td>10.5</td><td>60 + 10 = 70</td></tr></tbody></table><p>5 个单位的费用为 <code>(0.5 × 2).toInt() = 1</code>；6 个单位为 <code>(0.5 × 3).toInt() = 1</code>。免费名额已经用完，但费用取整形成了这次相同的结果。生成后的刷新仍然发生，不能由“数字没变”推断“没有刷新”。两次 10.5 各自入账 10，不把两个 0.5 合成下一次的 1。</p></details>
+<h3>练习 B · 幸福度变了，哪一步会影响旧进度（4 分钟）</h3>
+<p>两城各有修正前净粮食 8、生产力 10，没有其他修正。文明幸福度从 −10 降到 −11，原因是甲城建筑变化；甲城已更新城市统计，随后调用文明刷新。乙城已有建造进度 30，项目一直合法。请说明：① 为什么乙城也需要刷新？② 两城的最终粮食与生产力是多少？③ 乙城旧进度是否立刻变 15？若接下来正常结束回合、无旧溢出，它的进度变多少？</p>
+<details class="rubric"><summary>展开核对要点</summary><p>① 幸福度跨过 −10 阈值，文明刷新以 <code>updateCivStats = false</code> 更新所有城市，乙城由此读取新幸福度。② 各城净粮食 0、生产力 5。③ 已有 30 点进度不会因预测刷新而减半；下一次普通生产结算加 <code>roundToInt(5) = 5</code>，得到 35。这里没有生产完成检查，也没有因刷新而改变国库。</p></details>
+<h3>练习 C · 用源码和测试核对（可选，10 分钟）</h3>
+<p>建议先在文明更新方法、<code>getStatMapForNextTurn</code>、单位放置末尾和 <code>addGold</code> 设置断点，分别观察“谁刷新”“读哪份明细”“何时改余额”。本课附有可复跑的 <a href="verification/Lesson16EconomyProbeTest.kt">Lesson16EconomyProbeTest.kt</a>，5 个用例直接调用真实方法；将它临时放到 <code>tests/src/com/unciv/logic/city/</code> 后，可通过 Gradle MCP 或 IDE 执行以下任务参数，完成后移除临时副本。</p>
+<pre><code>:tests:test
+--tests com.unciv.logic.city.Lesson16EconomyProbeTest
+--tests com.unciv.uniques.GlobalUniquesTests.statsNotOnBuilding
+--tests com.unciv.uniques.GlobalUniquesTests.statsHappinessNotOnBuilding
+--tests com.unciv.uniques.GlobalUniquesTests.unhappiness*
+--tests com.unciv.logic.civilization.managers.GoldenAgeManagerTest
+--rerun</code></pre>
+<details class="rubric"><summary>本次验证证据与范围</summary><p>2026-09-24，通过 Gradle MCP 运行上述选择：5 个本课用例、4 个既有全局产出与幸福度用例、10 个黄金时代用例，共 19 项通过，0 失败、0 跳过。</p><ul><li>两城真实明细合并得到 Buildings=13.75、Maintenance=−3、道路=−1；重复刷新不改变国库。真实文明结束与开始调用得到 35→47、4→5 个单位、净流量 9.75→8.75、国库 100→109→109→117。</li><li>单位数 1～7 的免费名额与取整通过；7 个单位在进度 1 时费用为 6，移除一个后为 4，移除引发的预测刷新不改变国库。</li><li>只显式更新甲城，文明幸福度依次为 0、−1、−10、−11、0；两城都得到表中的粮食和生产力，国库不变。</li><li>无贸易场景中，净流量 −2.75 从国库 1 入账到 −1；之后刷新科学由 10 变 7.25，扩大赤字后保留 1 科学。</li><li>单独把 <code>currentCityStats.gold</code> 改成 999 不影响文明汇总，证明汇总读的是 <code>finalStatList</code>；直接改建筑定义而不刷新城市，文明读取的仍是旧明细。</li></ul><p>测试为隔离机制而固定地图、规则输入与回合进度，不模拟完整敌方行动、贸易变化或强制解散流程。最后一个用例故意修改缓存用于确认读取位置，不是正常游戏写法。既有测试不直接覆盖本课的新单位入账时间线，因此由附带用例补充验证；这些是教材证据，不是学习者练习结果。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2>
+<p><strong>优先阅读 <code>getStatMapForNextTurn</code> 与 <code>TurnManager.endTurn</code>：</strong>前者解释数字怎么来，后者解释数字何时进入状态。再读维护费和幸福度的分支。链接固定到本课提交。</p>
+<ol><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L174">文明来源合并、费用、赤字与贸易的真实顺序</a>。</li><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L252">文明结束：刷新、黄金入账、城市结束与后续处理</a>。</li><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/Civilization.kt#L479">幸福度边界与预测更新</a>，结合 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Ruleset.kt#L169">阈值来源</a>。</li><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoStatsForNextTurn.kt#L35">单位维护费公式</a>，以及 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L749">新单位触发预测刷新</a>。</li><li><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/uniques/GlobalUniquesTests.kt#L43">全局产出与幸福度既有测试</a>，以及 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/civilization/managers/GoldenAgeManagerTest.kt#L24">黄金时代既有测试</a>。</li></ol>
+<p>下次学习前，用两分钟不看正文复述：“新单位出现后，哪一份集合、哪一份预测和哪一份余额先后变化？”约一周后重做练习 A，并检查是否误把黄金当成四舍五入、把刷新当成入账。</p>
+<p>下一课「资源怎样被接入与消耗」将接着追 <code>updateCivResources</code>，区分地块上有资源、文明有可用供应和每回合消耗。遇到解释不通的地方，可以直接向教学助手提问，附上方法名、输入数字和自己的推演。</p>
+<div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0015-production-construction.html">上一课：生产力怎样完成建造</a><a href="reference/architecture.html">架构速查</a><a href="index.html#lesson-17">下一课：资源怎样被接入与消耗（待制作）</a></div>
+</section>
+<footer>资料核对：2026-09-24。城市明细参与文明汇总，预测刷新不等于国库入账；普通新单位在本方开始时生成并影响预测，后续结束结算采用当时的净流量。教材验证不代表学习完成。源码基线：1df6249a41301056ddc4448a95a93ddf5403e061。</footer>
+</main></div>
+</body>
+</html>

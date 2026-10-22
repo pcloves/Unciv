@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>13 · 一块地怎样变成产出 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>13 / 一块地怎样变成产出</strong><a href="#goal">目标、回顾与场景</a><a href="#receipt">1. 单格结算单：getTileStatsBreakdown</a><a href="#chain">2. 逐条相加：地形、改良与道路</a><a href="#gates">3. 三张闸门：可见、保底、加或乘</a><a href="#city">4. 城市总账：updateTileStats 与 update</a><a href="#trace">5. 追一次改良完成与科技解锁</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第 03、06、10 课<br>含源码走读与推演练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第三阶段 / 经济专题 · 地基课</div>
+<h1>一块地怎样变成产出</h1>
+<p class="lead">经济专题的第一课。地图专题留下了一个常驻问题：<strong>每块地左上角那几行小数字（粮、锤、金）是怎么算出来的？城市顶部那一排汇总又是谁加的？</strong>答案不在一处大公式里，而在两道工序上：<code>TileStatFunctions</code> 先给单格开一张分笔写清的结算单，<code>CityStats</code> 再把该算的格子收进城市、与人口和建筑的其它来源并列，最后落成玩家看到的七个数。这一课把这两道工序走透——后面的人口、建造、文明账本，都只是把这张总结算单往下传。</p>
+<p class="meta">需要的基础：第三课的 Unique 定义到使用点查询（本课每条加成都走那套）；第六课的 allTerrains 分层与河流公共边（结算单的地形部分直接从这两层摊出来）；第十课起点评价里的农田、矿山、河流（同一批地形作为例子贯穿全课）。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>单格：</strong>一格的产出长什么样，是谁一条条填出来的？</li><li><strong>门槛：</strong>资源、保底、河流、改良与百分数加成各判了什么条件才生效？</li><li><strong>汇总：</strong>哪些格进城市，算完在哪一层补，最后七个数落在哪个字段？</li></ul><p>读完还要会一件事：不看正文，说出草地+农田+河边这一格，在文明不同科技下各笔加成分别由哪个方法加上。</p></div><div><h3>口述回顾：第三、六、十课</h3><ol><li>第三课：粮仓那条 "+1 粮"，从 JSON 定义追到使用点，最后在哪个方法里真正加上？</li><li>第六课：allTerrains 按什么顺序返回？河流信息存在格子的哪一侧？</li><li>第十课：起点评价的三环各查什么、closeStartPenalty 怎么封顶？</li></ol><p>这三条是本课的地基，答不上就回对应课扫一眼。</p><p class="source"><a href="0003-rule-pipeline.html">第三课：一条规则怎样进入游戏</a><a href="0006-tilemap.html">第六课：地块怎样组成地图</a><a href="0010-starts-resources.html">第十课：可玩的出生地与资源</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody>
+<tr><td>单格结算单</td><td>14 分钟</td><td>getTileStatsBreakdown 的来源顺序与三桶分拣</td></tr>
+<tr><td>逐条相加</td><td>10 分钟</td><td>地形叠层、改良票面与邻近/科技/淡水条件</td></tr>
+<tr><td>三张闸门与乘数</td><td>10 分钟</td><td>资源可见、城中心保底、百分数按桶乘</td></tr>
+<tr><td>城市与追踪</td><td>12 分钟</td><td>updateTileStats 的工作格三条件、update 的接力顺序</td></tr>
+</tbody></table>
+</section>
+
+<section id="receipt"><h2>1. 单格结算单：getTileStatsBreakdown</h2>
+<p>玩家往某格一看，弹出 "+2 粮、+1 金"。这个数不是地形 JSON 里现成的，而是 <code>TileStatFunctions.getTileStatsBreakdown</code> 当场拼出来的。它返回的不是一个数，而是一张<strong>账目明细</strong>：每条来源一行 <code>(来源名, 小计)</code>。全地图、全文明、全界面都走这个入口：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileStatFunctions.getTileStatsBreakdown（部分代码）。问：这一格总共几笔？</span>
+@LocalState val listOfStats = getTerrainStatsBreakdown(gameContext)  <span class="comment">// ① 地形票面</span>
+val improvement = tile.getUnpillagedTileImprovement()               <span class="comment">// ② 改良（被摧毁/掠夺的不算）</span>
+val road = tile.getUnpillagedRoadImprovement()                      <span class="comment">// ③ 道路</span>
+
+if (city != null) { /* ④ 城市带给本格的 unique 进三桶（下一块） */ }
+
+if (tile.isAdjacentToRiver()) {
+    listOfStats += getSingleTerrainStats(riverTerrain!!, gameContext) <span class="comment">// ⑤ 河边 +1 金</span>
+}
+
+var minimumStats = if (tile.isCityCenter()) Stats.DefaultCityCenterMinimum
+    else Stats.ZERO                                                 <span class="comment">// ⑥ 城中心保底</span>
+
+if (observingCiv != null) {
+    if (observingCiv.canSeeResource(resource))
+        listOfStats.add(resource.name to resource)                  <span class="comment">// ⑦ 资源（看见了才有）</span>
+    improvementStats.add(getExtraImprovementStats(improvement, observingCiv, city))
+                                                                    <span class="comment">// ⑧ 改良的科技/邻近加成</span>
+}
+
+listOfStats.add("Minimum" to missingFromMinimum(sum, minimumStats)) <span class="comment">// ⑨ 保底补差</span>
+return listOfStats.filter { !it.second.isEmpty() }
+    .map { it.first to it.second.clone() }                          <span class="comment">// ⑩ 滤掉空行、拷出去（防被改）</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/TileStatFunctions.kt">本地 TileStatFunctions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L57">getTileStatsBreakdown · L57</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/stats/Stats.kt#L277">DefaultCityCenterMinimum · Stats.kt L277</a></p></div><div><p>脑内模型是<strong>柜台开收据</strong>：营业员拿一张空白结算单从上往下逐条问——地形票面多少？改良、道路各加多少？这个城市对我这格有没有特别加价？挨着河加不加？保底线要不要补？每条都是一行“名字 + 数”，最后把全 0 的行滤掉、条款拷一份出去（原件可能挂在规则对象上，不能让人改）。后面怎么加，交给拿单的人，他只挑自己关心的行看。</p><p>① 地形票面是第六课的 allTerrains 从底（基础地形）到顶（自然奇观、特征）摊出的票面数值，遇 <code>overrideStats</code>（如 Ice）整层替换、遇 <code>NullifyYields</code> 直接只留本层。</p><p>②③ 改良与道路各起一个小桶；<code>getUnpillaged…</code> 是“没被掠夺才算”的闸门，废墟不算账。</p><p>④ 城市带给本格的 unique 有独立入口，下一块讲。</p><p>⑤ 河流不是地形（第九课的三布尔边存储），但产出上和地形同等对待：按规则集里那个虚拟 "River" 地形读票面（G&amp;K 是 <code>gold=1</code>），规则集没这条时退回硬编码的 +1 金。第十课起点评价里的“临河加分”就是这条的另一个消费方。</p><p>⑥ 保底只在城中心起，默认 2 粮 1 锤。沙漠城中心票面全 0，靠保底补成 2 粮 1 锤——这是“新开的城不会 0 产出”的来源。</p><p>⑦ 资源既不是地形也不是改良，它挂在观察方身上：<strong>看见才算</strong>（canSeeResource 依科技与规则判定），同一格给不同文明看结论可以不同。</p><p>⑧ 改良的额外加成单独一个方法，吃科技、邻近格数与淡水条件，第 2 节展开。</p><p>⑨⑩ 汇总前先补保底差值，最后滤掉空行、逐行克隆——注释点名“别改到 uniques/terrains 里的原型 Stats”。</p></div></div>
+<p>票面出好之后，让同一格在不同文明、不同时代数值不同的是城市 unique 的三笔加价。这是本课最密的一段，看左侧如何把一张纸分进三个桶：</p>
+<div class="paired"><div><pre><code><span class="comment">// getTileStatsBreakdown 里城市 unique 那个 if（部分代码）。</span>
+<span class="comment">// 问：粮仓的 "+1 粮 from [Farm] tiles [in all cities]" 怎么进结算单？</span>
+city.forEachMatchingUnique(UniqueType.StatsFromTiles, gameContext) { unique -&gt;
+    if (city.matchesFilter(unique.params[2])) addStats(unique)   <span class="comment">// ① 先过“本城/全部城”这关</span>
+}
+city.forEachMatchingUnique(UniqueType.StatsFromObject, gameContext, addStats)
+                                                                 <span class="comment">// ② 来自某个对象名字</span>
+city.forEachMatchingUnique(UniqueType.StatsFromTilesWithout, gameContext) { unique -&gt;
+    if (city.matchesFilter(unique.params[3])
+        &amp;&amp; !tile.matchesFilter(unique.params[2])) addStats(unique) <span class="comment">// ③ 没有 XX 的格才加</span>
+}
+
+fun addStats(unique: Unique) {
+    val tileType = unique.params[1]                              <span class="comment">// ④ 点的是谁的名：Farm / Grassland / Road</span>
+    if (improvement != null &amp;&amp; improvement.matchesFilter(tileType, gameContext))
+        improvementStats.add(unique.stats)                       <span class="comment">// ⑤ 进改良桶</span>
+    else if (tile.matchesFilter(tileType, observingCiv))
+        listOfStats.add("{对象名} ({显示文本})", unique.stats)    <span class="comment">// ⑥ 进地形票面行</span>
+    else if (road != null &amp;&amp; road.matchesFilter(tileType, gameContext))
+        roadStats.add(unique.stats)                              <span class="comment">// ⑦ 进道路桶</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/TileStatFunctions.kt">本地 TileStatFunctions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L71">城市 unique 三笔 · L71</a><a href="../../tests/src/com/unciv/uniques/GlobalUniquesTests.kt">GlobalUniquesTests.kt（本段测试）</a></p></div><div><p>脑内模型是<strong>分拣台</strong>：城里每栋建筑、每项政策、每份宗教都往下递纸条，分拣员先看纸条点的是谁的名，再往对应桶里放——同一条“+1 粮”，点名 Farm 就进改良桶，点名 Grassland 就进地形票面。第三课那条粮仓 unique 走的正是这条路。</p><p>① StatsFromTiles 的模板是 <code>[+N Stat] from [XXX] tiles [cityFilter]</code>，所以在查之前先过一层 cityFilter——“某座城”和“全部城”就是靠这一行区分，测试里的 statsFromTiles 与 statsFromTilesMultifilter 正钉着这一点。</p><p>② StatsFromObject 不卡地形，专门匹配“某个对象名”（某 specialist、某建筑名），本格里任一承载层的名字对上就加。</p><p>③ StatsFromTilesWithout 是“本格没有 XX 才加”；G&amp;K 里 Farm 的淡水条件是写在改良自身 unique 上的，这类模板主要留给 mod。</p><p>④⑤⑥⑦ 三个桶的优先级简单：<strong>改良名对上先走改良</strong>，否则看格子的地形/通用名，否则看道路名。一张纸条永远只进一个桶，不会双计。</p></div></div>
+<p>把这一节落到具体数字上。用同一组场景实测（G&amp;K 规则集、TestGame 全草地小图）：</p>
+<ul>
+<li>草地+农田：明细两行 <code>Grassland +2 粮</code>、<code>Farm +1 粮</code>，合计 3 粮。</li>
+<li>再加一条河（未研 Civil Service）：多一行 <code>River +1 金</code>，合计 3 粮 1 金；农田仍只加 1 粮。</li>
+<li>研出 Civil Service：农田那行变 +2 粮（淡水 unique 生效），合计 4 粮 1 金。注意这一笔来自 <code>getExtraImprovementStats</code>，不是 Farm 票面本身。</li>
+</ul>
+</section>
+
+<section id="chain"><h2>2. 逐条相加：地形、改良与道路</h2>
+<p>结算单的常态是一串独立加数：地形票面 → 改良票面 → 城市进格 unique → 邻近/科技/淡水加成 → 保底。谁都不依赖谁，依次加上。地形叠层与改良加成合在左侧一块看：</p>
+<div class="paired"><div><pre><code><span class="comment">// getTerrainStatsBreakdown 与 getExtraImprovementStats 的骨架（部分代码）。</span>
+<span class="comment">// 问：多处地形的票面怎么合？改良“每邻近一处森林 +1 金”从哪来？</span>
+for (terrain in tile.allTerrains) {                              <span class="comment">// ① 从底到顶：基础地形→奇观→特征</span>
+    val terrainStats = getSingleTerrainStats(terrain, gameContext)
+    when {
+        terrain.hasUnique(NullifyYields) -&gt; return terrainStats  <span class="comment">// ② 只留本层，后面全不算</span>
+        terrain.overrideStats -&gt; list = terrainStats             <span class="comment">// ③ 本层替换之前所有层</span>
+        else -&gt; list += terrainStats                             <span class="comment">// ④ 普通情况：往上叠</span>
+    }
+}
+
+improvement.forEachMatchingUnique(UniqueType.Stats) { unique -&gt;
+    stats.add(unique.stats)                                      <span class="comment">// ⑤ 改良定义里写死的票面</span>
+}
+improvement.forEachMatchingUnique(UniqueType.ImprovementStatsForAdjacencies) { unique -&gt;
+    val adjacent = unique.params[1]
+    val n = tile.neighbors.count {
+        it.matchesFilter(adjacent, observingCiv)                <span class="comment">// ⑥ 数一数邻近几个 XX</span>
+            || it.getUnpillagedRoad().name == adjacent
+    }
+    stats.add(unique.stats * n)
+}
+improvement.forEachMatchingUnique(UniqueType.ImprovementStatsOnTile) { unique -&gt;
+    if (tile.matchesFilter(unique.params[1])
+        || unique.params[1] == Constants.freshWater &amp;&amp; tile.isAdjacentTo(Constants.freshWater)
+        || unique.params[1] == "non-fresh water" &amp;&amp; !tile.isAdjacentTo(Constants.freshWater))
+        stats.add(unique.stats)                                  <span class="comment">// ⑦ 淡水/非淡水/地形条件</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/TileStatFunctions.kt">本地 TileStatFunctions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L164">getTerrainStatsBreakdown · L164</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L294">getExtraImprovementStats · L294</a></p></div><div><p>脑内模型是<strong>一格的几层贴纸</strong>：地形本身可能叠多层（草地+森林、海面+环礁），从下往上一层层贴；override 层会把之前整张换掉，Nullify 层说“只留我这一张”。改良则分两种：定义里写死的票面（"+1 粮"），和要现场数条件才给的额外加成。</p><p>① allTerrains 的顺序是第六课定的：基础地形 → 自然奇观 → 地形特征。顺序决定“叠加还是替换”。</p><p>②③ overrideStats 与 NullifyYields 是两个极端：前者是“本层换掉底下的与之前的特征”（Ice 就是），后者是“只留我一张票”。</p><p>④ 默认是简单叠上去——草地+森林就是草地票面（2 粮）加森林票面（+1 锤）。</p><p>⑤⑥⑦ 改良的额外加成分成三段，顺序固定：先加定义里的票面；再按邻近格数按比例给（数邻居里匹配的对象，或一条同名道路）；最后按本格条件给（淡水、非淡水、某种地形）。G&amp;K 农场那条 "[+1 粮] from [Fresh water] tiles &lt;after discovering [Civil Service]&gt;" 走的就是 ⑦，条件里还带科技。</p></div></div>
+<p>把这条链代进一个具体格子。平原+森林+伐木场+道路，未研相关科技时：</p>
+<table><thead><tr><th scope="col">账目行</th><th scope="col">来自哪一段</th><th scope="col">粮</th><th scope="col">锤</th><th scope="col">金</th></tr></thead><tbody>
+<tr><td>Plains</td><td>基础地形票面</td><td>1</td><td>1</td><td>0</td></tr>
+<tr><td>Forest</td><td>特征票面（叠在平原上）</td><td>0</td><td>+1</td><td>0</td></tr>
+<tr><td>Lumber mill</td><td>改良票面</td><td>0</td><td>+1</td><td>0</td></tr>
+<tr><td>Lumber mill 科技加成</td><td>getExtraImprovementStats ⑤⑥⑦（未研科技，暂 0）</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td>Road</td><td>道路票面</td><td>0</td><td>0</td><td>+1</td></tr>
+<tr><td>合计</td><td>—</td><td>1</td><td>3</td><td>1</td></tr>
+</tbody></table>
+<p>研出 Scientific Theory 后，伐木场那行多 +1 锤，合计变 1 粮 4 锤 1 金。同一格上多出一笔的来源、落点、增量，都能在这张表上说清。</p>
+</section>
+
+<section id="gates"><h2>3. 三张闸门：可见、保底、加或乘</h2>
+<p>同一格不会对任何询问者都长出一样的明细。区分“谁来问”的只有三件事：资源可见性、城中心保底、以及百分数乘在哪一行。前两件在结算单里，第三件在 <code>getTileStats</code> 的尾部：</p>
+<div class="paired"><div><pre><code><span class="comment">// getTileStatsBreakdown 尾段（部分代码）。</span>
+<span class="comment">// 问：同一格为什么给旁观者一套、给 AI 另一套？</span>
+if (observingCiv != null) {
+    if (observingCiv.canSeeResource(resource))
+        listOfStats.add(resource.name to resource)              <span class="comment">// ① 资源看得见才算</span>
+    improvementStats.add(getExtraImprovementStats(improvement, observingCiv, city))
+                                                                <span class="comment">// ② 科技/邻近加成也看观察方</span>
+}
+
+val minimumStats = if (tile.isCityCenter()) Stats.DefaultCityCenterMinimum
+    else Stats.ZERO                                             <span class="comment">// ③ 城中心保底 2 粮 1 锤</span>
+val statsFromMinimum = missingFromMinimum(listOfStats.toStats(), minimumStats)
+listOfStats.add("Minimum" to statsFromMinimum)                  <span class="comment">// ④ 只补差值</span>
+
+<span class="comment">// getTileStats：把结算单加总并逐桶乘百分数（部分代码）</span>
+val percentageStats = getTilePercentageStats(observingCiv, city) <span class="comment">// ⑤ 收集地块级百分数</span>
+for ((cause, stats) in statsBreakdown) {
+    val tileType = when (cause) {
+        improvement -&gt; TilePercentageCategory.Improvement
+        road.name -&gt; TilePercentageCategory.Road
+        else -&gt; TilePercentageCategory.Terrain                   <span class="comment">// ⑥ 按来源行名归三桶</span>
+    }
+    for ((stat, value) in percentageStats[tileType]!!)
+        stats[stat] *= value.toPercent()                        <span class="comment">// ⑦ 行内乘，不跨桶</span>
+}
+return statsBreakdown.toStats()</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/TileStatFunctions.kt">本地 TileStatFunctions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L36">getTileStats · L36</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L102">保底段 · L102</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L192">getTilePercentageStats · L192</a></p></div><div><p>脑内模型是<strong>同一张单给三个观众看</strong>：旁观者（observingCiv 为空）只拿到票面——没有资源、没有科技加成；AI 拿到它此刻该有的；人类玩家拿到全部。同一格数值不同，不是格子变了，是观察方变了。保底是另一回事：它是城中心的“不足补满”，只对城中心那一格有效。百分数乘法则在最外层，地形票、改良桶、道路桶各自乘自己那张百分数小计。</p><p>① 资源可见性由 <code>Civilization.canSeeResource</code> 判，多数资源要某科技（铁要铁器加工）。实测：同一块小麦格，文明看不见时只按草地算 2 粮，看见后变 3 粮。</p><p>② getExtraImprovementStats 是“改良与观察方科技是否达成”的接口，Civil Service、Fertilizer、Scientific Theory 这类条目都从这里进账。</p><p>③④ 保底只在城中心。missingFromMinimum 算的是<strong>差值</strong>而不是把保底又加一遍——草地城中心已满足 2 粮 1 锤就不补，沙漠才补到 2 粮 1 锤。这正是“包底”与“加成”的区别，也是新手常混的一点。</p><p>⑤⑥⑦ 百分数加成单独由 getTilePercentageStats 收集，产出一张 <code>TilePercentageCategory → Stats</code> 的 EnumMap。乘法的关键是“每个来源只乘自己归类那一桶的百分数”：地形票上的 +10% 锤不会加到改良桶，改良的 +10% 也不会漏到地形票。分类依据是结算单那一行的来源名（是不是改良名、是不是道路名），其余行一律归 Terrain。</p></div></div>
+</section>
+
+<section id="city"><h2>4. 城市总账：updateTileStats 与 update</h2>
+<p>单格结算单最后要进城市。先解决“哪些格算”：只有三类收进工作格，其余哪怕在城界里也不算。</p>
+<div class="paired"><div><pre><code><span class="comment">// CityStats.updateTileStats（部分代码）。问：这一格算不算城市的产出？</span>
+val workedTiles = city.tilesInRange.asSequence().filter {        <span class="comment">// ① 城界内逐格筛</span>
+    city.location.toHexCoord() == it.position                     <span class="comment">// ② 城中心，免费算</span>
+    || city.isWorked(it)                                          <span class="comment">// ③ 有人口派工的格</span>
+    || (it.owningCity == city &amp;&amp; (it.getUnpillagedTileImprovement()
+        ?.hasUnique(TileProvidesYieldWithoutPopulation, ...) == true
+        || it.terrainHasUnique(TileProvidesYieldWithoutPopulation, ...)))
+                                                                  <span class="comment">// ④ 不派人口也产出的特殊格</span>
+}
+for (tile in workedTiles) {
+    if (tile.isBlockaded() &amp;&amp; city.isWorked(tile)) {              <span class="comment">// ⑤ 被封锁的格</span>
+        city.stopWorkingTile(tile)
+        city.shouldReassignPopulation = true
+        continue
+    }
+    val tileStats = tile.stats.getTileStats(city, city.civ)       <span class="comment">// ⑥ 取本格结算单合计</span>
+    stats.add(tileStats)                                         <span class="comment">// ⑦ 累加进城市地块收入</span>
+}
+statsFromTiles = stats</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/CityStats.kt">本地 CityStats.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L349">updateTileStats · L349</a></p></div><div><p>脑内模型是<strong>门店对账</strong>：本店辖地内，经理只认三类格——店址本格（城中心）、挂牌出工的格（派了人口）、挂了“免人口产出”牌子的格；其它格就算贴着店边，也不进今天这本账。</p><p>①② city.tilesInRange 是城市的三环；城中心永远算，不派人口也在账上。实测：人口 1 的首都，statsFromTiles 是 +1 锤 5 粮 = 城中心草地（2 粮，靠保底补到 2 粮 1 锤）+ 派工农田（3 粮）。</p><p>③ 派工靠 <code>city.isWorked</code>——一个人口管理器维护的集合。地块所有权（这格是不是我的）与工作（有没有人在这格上干活）是两件事：有主没人干，不进账。</p><p>④ 个别改良/地形支持“不派人口也产出”，拥有这类格的城也把它算进来。普通城里很少命中，但代码一并覆盖。</p><p>⑤ 被封锁的格：产出不给，人口也被提出来等重新分配——这是一次行为，不是数值修正。</p><p>⑥⑦ 每个工作格都调 <code>getTileStats(city, civ)</code> 拿合计，连续 add 进 statsFromTiles。这是地块对城市的唯一收入管道，没有第二处“人工再汇总一遍”。</p></div></div>
+<p>statsFromTiles 只是城市总账的一项。<code>CityStats.update</code> 按固定顺序把七个数拼出来，末尾再按建造队列追加转化行：</p>
+<div class="paired"><div><pre><code><span class="comment">// CityStats.update（部分代码）。问：statsFromTiles 怎么进七数总账？</span>
+if (updateTileStats) updateTileStats()                            <span class="comment">// ① 先算格子</span>
+val statsFromBuildings = city.cityConstructions.getStats()         <span class="comment">// ② 建筑票面（较贵，只算一次）</span>
+val statsFromSpecialists = getStatsFromSpecialists(...)            <span class="comment">// ③ 专家产出</span>
+val statsFromUniquesBySource = getStatsFromUniquesBySource()       <span class="comment">// ④ 按来源分的城市 unique</span>
+updateBaseStatList(...)                                           <span class="comment">// ⑤ 装进 baseStatTree：人口/地块/建筑/专家/贸易</span>
+updateCityHappiness(...)                                          <span class="comment">// ⑥ 快乐度（地块的 happiness 也参与）</span>
+updateStatPercentBonusList(currentConstruction)                  <span class="comment">// ⑦ 各来源百分数合计</span>
+updateFinalStatList(currentConstruction)                          <span class="comment">// ⑧ 逐项落乘数、维护费、余粮转化</span>
+currentCityStats = 所有 finalStatList 项之和                       <span class="comment">// ⑨ 钉住供界面读取</span>
+if (updateCivStats) city.civ.updateStatsForNextTurn()             <span class="comment">// ⑩ 再往上一层：文明</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/CityStats.kt">本地 CityStats.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L485">update · L485</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L435">updateBaseStatList · L435</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L513">updateFinalStatList · L513</a></p></div><div><p>脑内模型是<strong>月底结账</strong>：出纳先点完工位（updateTileStats，地块进账的唯一管道），柜台再逐项叠上人口、建筑、专家、贸易路线、城市 unique。这些原值先放进 baseStatTree；随后按比例调整——statPercentBonusTree 收齐黄金年代（+20% 锤和文）、傀儡城（−25% 科学与文化）、兵力不足（产锤惩罚）等百分数来源；最后逐项落乘数，再处理维护费、余粮转生产、生产转科学、被占期间的清空等特殊规则。</p><p>① statsFromTiles 在这一步算好，下面才可能被引用。</p><p>②③④ 建筑、专家、按来源分的城市 unique 一次性算好往下传——源码注释点名这几步“贵”，同一份输入不重复算。</p><p>⑤⑥⑦⑧ 顺序有依赖：先有地块票面才能算快乐度（地块的 happiness 参与）；先有快乐度与百分数树，才能落最终乘数。源码注释里那段“食物计算很绕”说明了为什么余粮与增长加成要放到最后单独处理。</p><p>⑨⑩ currentCityStats 是给界面读的最终七数；update 的最后一脚把改动推给文明层（第 16 课展开）。实测：人口 1 首都 currentCityStats = +1 锤 3 粮 1 科学（Population 行给 −2 粮 +1 科学，地块给 +1 锤 5 粮）。</p></div></div>
+<p>update 的触发面很广：人口变了、地块变了、建造队列变了、科技变了，任何一项变化都会推一次 update。所以玩家不需要懂所有公式，也不会因为多修一条路而看不见加成——所有变化都收束到同一条链：updateTileStats → update → currentCityStats。</p>
+</section>
+
+<section id="trace"><h2>5. 追一次改良完成与科技解锁</h2>
+<p>把两个最常问的场景串起来：① 农场修好了；② 研究出 Civil Service。两个动作都不直接改数字，而是改条件，等下一次重算才体现：</p>
+<div class="paired"><div><pre><code><span class="comment">// 修建完成 → 科技解锁（各方法分散在几个类，按时间顺序拼排）。</span>
+<span class="comment">// 问：农场修好后这一格怎么变 3 粮？研出 Civil Service 后又怎么变多？</span>
+// 修建完成：
+tile.improvement = "Farm"                                         <span class="comment">// ① 落到格子上</span>
+tile.setTerrainTransients()                                       <span class="comment">// ② 重建瞬时索引（含 allTerrains）</span>
+
+// 城市侧任一变化都会推 update：
+updateTileStats()                                                 <span class="comment">// ③ 所有工作格重算一遍</span>
+tile.stats.getTileStats(city, city.civ)                           <span class="comment">// ④ 本格：地形票 + Farm 票面</span>
+updateFinalStatList(...)                                          <span class="comment">// ⑤ 全链落乘数</span>
+currentCityStats = ...                                            <span class="comment">// ⑥ 界面读到 +3 粮</span>
+
+// 研出 Civil Service：
+civ.tech.addTechnology("Civil Service")                           <span class="comment">// ⑦ 科技入账（此时不动地块）</span>
+city.cityStats.update()                                           <span class="comment">// ⑧ 下次重算时条件才生效</span>
+getExtraImprovementStats(...)                                     <span class="comment">// ⑨ Farm 淡水 unique 命中，+1 粮</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/TileStatFunctions.kt">本地 TileStatFunctions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L294">getExtraImprovementStats · L294</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L485">CityStats.update · L485</a></p></div><div><p>脑内模型是<strong>换了招牌，重开发票</strong>：修完农田不是“写下 +1”，而是招牌换了；研出科技不是“马上 +1”，而是条件从 false 变 true。两件事的下一瞬间都不动产出本身，一切交给下一次重算重新开发票。这样所有变化只走同一条链，不会出现“科技进来时手动补一笔”的旁路。</p><p>①② 改良落到格子并重建瞬时索引，此时结算单还等着重算。</p><p>③④ 重算时逐格取结算单——农田票面 +1 粮进来，合计从 2 粮变 3 粮。</p><p>⑤⑥ 城市重算后 currentCityStats 更新，界面下一帧显示 +3 粮。</p><p>⑦ 科技入账本身不改地块，只让 Farm 的淡水 unique 条件成立。</p><p>⑧⑨ 下一次重算时 getExtraImprovementStats 命中该 unique，农田行由 +1 变 +2 粮。实测：同一格合计由 3 粮 1 金变 4 粮 1 金。这类“条件型加成”是经济系统最容易被漏看的部分——数字不涨时，先查是不是少了哪个条件、或还没触发重算。</p></div></div>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul>
+<li><strong>单格是结算单：getTileStatsBreakdown 逐笔写清“来源名 + 数”；getTileStats 在尾部补保底差值、再逐桶乘百分数，最后汇总成玩家看到的数。</strong></li>
+<li><strong>三桶分拣：城市的加成按“点谁的名”进地形票面、改良桶、道路桶；一条 unique 只进一个桶，不会双计。</strong></li>
+<li><strong>保底是补差不是加成：城中心默认 2 粮 1 锤，只补到够，沙漠变 2 粮 1 锤靠的就是这一行。</strong></li>
+<li><strong>百分数按桶分开乘：地形票、改良桶、道路桶各乘自己那张小计，不会把改良的 +10% 漏到地形票上。</strong></li>
+<li><strong>地块收入是单向管道：updateTileStats 逐格 add 出 statsFromTiles；update 再经 baseStatTree（原值）→ statPercentBonusTree（百分数）→ finalStatList（落乘数/维护费/转化）→ currentCityStats（界面读）四步落定。</strong></li>
+<li><strong>条件挂在观察方：资源可见、科技是否已研都以 observingCiv 为输入；同一格给不同文明看数值可以不同，不是格子自己变了。</strong></li>
+</ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看正文，凭记忆回答。选错了，回到对应段落弄清原因。选择题只是热身；不看正文讲清“结算单怎么拼、工作格是哪些、保底是补还是加、百分数在哪一段乘”，本课内容就过关。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. 格子结算单里，哪一条在 city 参数为空时仍会进账？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="城市 unique 整段包在 if (city != null) 里，city 为空时一条都不加。"><span>城市给本格加价</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="河流加金不走城市：isAdjacentToRiver 直接读规则集里的虚拟 River 票面（1 金），city 为空也照加。"><span>河流加的这笔金</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="资源分两关：先要 observingCiv 不为空，再要 canSeeResource 为真；两者缺一不加。"><span>票面的资源加成</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="科技加成由 getExtraImprovementStats 完成，整段包在 observingCiv 判空分支里，为空不执行。"><span>改良的科技加成</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>2. 城中心默认保底 2 粮 1 锤，这个保底怎么加？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="若按“加”理解，草地城中心会变成 4 粮 2 锤，与实际不符；保底只补差值。"><span>在票面上叠加</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="保底值是 2 粮 1 锤，不是 1 粮 1 锤 1 金；且金额只作 isCityCenter 判定，不凭空发钱。"><span>再加一粮一金</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="missingFromMinimum 算差值：草地票面 2 粮 1 锤已够，不补；沙漠票面全 0，只补到 2 粮 1 锤。这就是“包底”而非“加成”。"><span>只把不足补齐</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="保底无条件只作用在城中心那一格，与是否临河、是否有资源都无关。"><span>临河时才会补</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>3. CityStats.updateTileStats 会把哪些格算进 statsFromTiles？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="三环只是筛选范围；进来还要过 filter，默认只有城中心与工作格（外加免人口特殊格）。"><span>城市三环内全部</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="漏了城中心：城中心不用派人口就直接算进账。"><span>只算人口派工格</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="地形是不是农田不是条件；关键在城中心、是否派工、是否有免人口产出 unique。"><span>只算修好农田格</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="三类并集：城中心 || isWorked || 拥有免人口产出 unique 的格；被封锁的格还会被摘掉并标记重新派工。"><span>城中心派工特殊</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. 某条“+10% 锤”乘在地形票还是改良桶，由什么决定？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="getTileStats 按结算单每一行的来源名归类：行名等于改良名进 Improvement 桶、等于道路名进 Road 桶，其余（含地形票面与 unique 追加行）归 Terrain。"><span>按来源行名归类</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="matchesFilter 是收集阶段挑 unique 用的；挑出来还只是三桶小计，真正决定乘在哪一行的是结算单的行名。"><span>按过滤后的行名</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="Stat 类型（粮锤金）不参与分桶，分类只看行来源，不看加成是什么属性。"><span>按加成属性类型</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="加法先后与分桶无关：先累加出结算单，进三桶以后才逐行乘。"><span>按加法先后顺序</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：河流加的一笔金；2：只把不足补齐；3：城中心派工特殊格；4：按来源行名归类。分别对应 <a href="#receipt">结算单顺序</a>、<a href="#gates">保底补差</a>、<a href="#city">工作格三条件</a>、<a href="#gates">三桶百分数</a>。</p></details>
+<h3>练习 A · 手推一张结算单（10 分钟）</h3><p>格子是平原（1 粮 1 锤）+ 森林（+1 锤）+ 伐木场（+1 锤）+ 道路（+1 金），未研科技。① 列出明细（来源名+数）。② 合计多少？③ 这格在城市三环内但没人派工，进 statsFromTiles 吗？④ 若派了工，产出交给谁汇总、落到哪个字段？</p><details class="rubric"><summary>展开核对要点</summary><p>① 五行：Plains（1 粮 1 锤）、Forest（+1 锤）、Lumber mill 票面（+1 锤）、Lumber mill 科技加成（未研科技，0）、Road（+1 金）。② 合计 1 粮 3 锤 1 金。③ 不进——三条件（城中心、isWorked、免人口产出）都不满足。④ 派工后由城市 updateTileStats 循环 add 到 statsFromTiles，update 再把它作为 “Tile yields” 一项放进 baseStatTree，与人口、建筑、专家各项并列。</p></details>
+<h3>练习 B · 两道资源/保底闸门（8 分钟）</h3><p>沙漠，无任何特征、无资源。① 建城后这一格合计多少？依据？② 同样一格拉进三环但仍是荒地（无主、无人派工），合计多少？依据？③ 给它挂一个小麦资源、文明尚未研农业，结算单会多一行吗？④ 研出农业之后呢？</p><details class="rubric"><summary>展开核对要点</summary><p>① 2 粮 1 锤：minimumStats = Stats.DefaultCityCenterMinimum，missingFromMinimum 把差值补上。② 0：不是城中心、没派工、没有免人口产出，且票面全 0，不算保底。③ 不会：canSeeResource 依赖科技，看不见就不加资源行。④ 会多一行 <code>Wheat +1 粮</code>，合计 1 粮。对比第 ① 问可见“保底与资源是两道独立闸门”。</p></details>
+<h3>练习 C · 乘在哪一层（5 分钟）</h3><p>城市建成一座给 “+20% 锤” 的建筑，同格是平原+农田+道路。① 这条 +20% 加在地块级还是城市级？② 若地块自身有“+10% 粮 from Farm”类 unique，它属于哪一桶？③ 建筑那条最终在哪一层落成乘积？</p><details class="rubric"><summary>展开核对要点</summary><p>① 城市级——建筑的 “+20% Production” 默认进 city 的 statPercentBonusTree，不进地块的三桶。② 地块自身的百分数由 getTilePercentageStats 按行名归桶，点名 Farm 的进 Improvement 桶。③ 在 updateFinalStatList 时，statPercentBonusTree 里的 Buildings 百分数对该城 production 各行相乘。</p></details>
+<h3>练习 D · 本地核验（可选，10 分钟）</h3><p>在本地环境复现本课数字：① 草地+农田结算单几行、合计多少？② 再加一条河（未研 Civil Service）合计多少，含 River 的 1 金吗？③ 研出 Civil Service 后农田那行是 +1 还是 +2 粮？④ 人口 1 的首都 statsFromTiles 是否为 +1 锤 5 粮？</p><details class="rubric"><summary>展开核对要点</summary><p>本课程核对（测试类，TestGame 半径 2 六边形图 + G&amp;K 规则集手动载入）：① 两行（Grassland +2 粮 / Farm +1 粮），合计 3 粮。② 合计 3 粮 1 金；River 票面的 1 金正常入账。③ +2 粮（Farm 票面 1 粮 + Civil Service 淡水加成 1 粮），整体变 4 粮 1 金。④ 是 +1 锤 5 粮（城中心草地+保底 + 派工农田 3 粮）；人口升 2 会自动派工到另一块草地，变 +1 锤 7 粮。注意：本次 REPL 出现“code is required”参数被吞异常，按交接预案改用测试类实测，跑完即删。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/tile/TileStatFunctions.kt">TileStatFunctions.kt</a> 的 getTileStatsBreakdown 全文（对着本课的结算单一段段比）；再读 <a href="../../core/src/com/unciv/logic/city/CityStats.kt">CityStats.kt</a> 的 updateTileStats 与 update（城市收入的唯一入口）；然后对照 <a href="../../android/assets/jsons/Civ V - Gods & Kings/Terrains.json">Terrains.json</a> 与 <a href="../../android/assets/jsons/Civ V - Gods & Kings/TileImprovements.json">TileImprovements.json</a> 里的草地、平原、农场、河流票面与 uniques，最后用 <a href="../../tests/src/com/unciv/uniques/GlobalUniquesTests.kt">GlobalUniquesTests.kt</a> 的 statsFromTiles 组核对城市 unique 的三条查询。</p><p>下次学习前，用两分钟默写：结算单的来源顺序（地形→改良/道路→城市三桶→河流→资源→保底）、三桶的归类方法（看来源行名）、保底是补差不是加成、工作格三条件。约一周后重做练习 A 和 B。记不清“保底为什么是补差”，回第 3 节看 missingFromMinimum 那段。</p><p>经济专题从这里展开：下一课（14）讲人口怎样工作和增长，承接本课的地块产出；15 讲生产力与建造完成；16 走到文明账本。口述回顾欠账里第六～十一课的六条仍开放，任一条口述即可补一份学习记录。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0012-sight-fog.html">上一课：地图怎样被看见</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="index.html#phase-c">下一课：人口怎样工作和增长（待制作）</a></div></section>
+<footer>资料核对：2026-09-18。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。实测（TestGame 半径 2 六边形图 + G&amp;K 规则集）：草地+农田 = 3 粮；再加河边未研 Civil Service = 3 粮 1 金；研出 Civil Service 后农田由 +1 变 +2 粮，合计 4 粮 1 金；城中心保底 2 粮 1 锤为补差；人口 1 首都 statsFromTiles = +1 锤 5 粮，人口 2 为 +1 锤 7 粮。REPL 的“code is required”异常本次复现，改用测试类实测并已删除。</footer>
+</main></div>
+</body>
+</html>

@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>03 · 一条规则怎样进入游戏 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>03 / 一条规则怎样进入游戏</strong><a href="#goal">目标、回顾与场景</a><a href="#definitions">1. 规则写在 JSON 里</a><a href="#combined">2. 每局游戏自己的规则集</a><a href="#unique">3. unique 从字符串变对象</a><a href="#instance">4. 规则进入对局</a><a href="#use">5. 使用点：产出加一</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 50～60 分钟<br>需先完成第二课<br>含源码走读与练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第一阶段 / 建立全局模型</div>
+<h1>一条规则怎样进入游戏</h1>
+<p class="lead">第二课把规则定义归为“不写进存档”的一类数据。这一课把这句话打开：规则写在哪些文件里，什么时候读进内存，建成一座建筑时怎么进入这局游戏，最后又是哪个代码点让它真正改变一块地的产出。</p>
+<p class="meta">需要的基础：Java 对象、集合、引用，以及基础 Kotlin；第二课的“三类数据”与 setTransients。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>先给一个具体场景：城市建成粮仓（Granary）后，城市里有人工作的鹿资源地块，每块多 1 食物。这条效果从哪里来？什么时候生效？为什么拆掉粮仓它就消失？整条链路上没有任何一个类在“执行”这条规则——效果是查询时套出来的。读懂这条链路，就理解了 Unciv 数据驱动的核心。</p>
+<h3>先找回第二课的三类数据</h3>
+<table><thead><tr><th scope="col">类别</th><th scope="col">例子</th><th scope="col">保存方式</th></tr></thead><tbody>
+<tr><td>对局状态</td><td>turns、City.location、Tile.baseTerrain、Civilization.gold</td><td>写进存档，只存 ID、坐标、数值</td></tr>
+<tr><td>规则定义</td><td>Ruleset：地形、建筑、单位模板</td><td>不写进存档，按 gameParameters 取</td></tr>
+<tr><td>运行时引用与缓存</td><td>civ、centerTile、owningCity、tileMatrix、viewableTiles</td><td>@Transient，setTransients 重建</td></tr></tbody></table>
+<p>第二课见到 <code>GameInfo.ruleset</code> 是 <code>@Transient</code> 字段，读档时按 <code>gameParameters</code> 里的规则集名字重新取一份。本课追“取一份”具体做了什么，以及规则定义里的每一条效果怎样变成对局里的实际数值。</p>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>定义放哪里：</strong>规则以什么形式存放？启动时谁把它们读进内存？</li><li><strong>怎样进对局：</strong>静态定义什么时候变成这一局里可以查询的东西？</li><li><strong>怎样生效：</strong>哪段代码在查询规则？条件、参数和倍率在哪里判定？</li></ul><p>读源码时记住这条主线：<strong>JSON 定义 → 规则集缓存 → 本局规则集 → 进入对局对象的 uniqueMap → 使用点查询</strong>。每一站都问：这里的东西是静态共享的，还是这一局独有的？</p></div><div><h3>先认识四个概念</h3><ul><li><strong>规则集（Ruleset）：</strong>一整套规则定义的集合，包含地形、建筑、单位、科技等；可以指内置规则集、模组或二者组合。</li><li><strong>规则（Unique）：</strong>一条可查询的效果或条件，在 JSON 里是一段带占位符的字符串，例如 <code>[+1 Food] from [Deer] tiles [in this city]</code>。</li><li><strong>占位文本（placeholderText）：</strong>把一条规则里的参数都压成 <code>[]</code> 后剩下的“模板”，用来查它属于哪种规则类型。</li><li><strong>判定场景（GameContext）：</strong>查询规则时带上的上下文（城市、地块、文明等），条件修饰语靠它判定。</li></ul><p class="source"><a href="reference/architecture.html#glossary">术语表</a><a href="../../android/assets/jsons/Civ V - Vanilla/Buildings.json">本地 Buildings.json</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>回顾与 JSON 定义</td><td>8 分钟</td><td>规则以什么形式存放，启动时何时加载</td></tr><tr><td>每局的组合规则集</td><td>10 分钟</td><td>缓存与对局规则集的关系，哪些对象被共享</td></tr><tr><td>unique 的解析</td><td>10 分钟</td><td>字符串怎样变成带类型和参数的对象</td></tr><tr><td>进入对局与查询</td><td>10 分钟</td><td>建成建筑时发生了什么，查询时条件在哪判定</td></tr><tr><td>心智模型与推演</td><td>12～16 分钟</td><td>预测粮仓的效果，追另一条规则到使用点</td></tr></tbody></table>
+</section>
+
+<section id="definitions"><h2>1. 规则写在 JSON 里，启动时一次性加载</h2>
+<p>游戏包里有 <code>android/assets/jsons/</code> 目录，内置两个规则集子目录：<code>Civ V - Vanilla</code> 和 <code>Civ V - Gods &amp; Kings</code>，每个目录下是 Buildings.json、Units.json、Terrains.json 等文件。粮仓的定义在 Buildings.json 里：</p>
+<div class="paired"><div><pre><code><span class="comment">// android/assets/jsons/Civ V - Vanilla/Buildings.json 中粮仓的定义。</span>
+{
+    "name": "Granary",
+    "food": 2,
+    "maintenance": 1,
+    "hurryCostModifier": 25,
+    "uniques": ["[+1 Food] from [Deer] tiles [in this city]",
+        "[+1 Food] from [Bananas] tiles [in this city]",
+        "[+1 Food] from [Wheat] tiles [in this city]"],
+    "requiredTech": "Pottery"
+}</code></pre><p class="source"><a href="../../android/assets/jsons/Civ V - Vanilla/Buildings.json">本地 Buildings.json · 粮仓定义</a><a href="../../android/assets/jsons/Civ V - Vanilla/GlobalUniques.json">本地 GlobalUniques.json</a></p></div><div><p>一条建筑定义由普通字段加 <code>uniques</code> 数组组成。<code>food: 2</code> 等数值直接给城市产出；<code>uniques</code> 里的字符串则每条都是一条带条件的规则。JSON 只是文本：谁把它读进内存、变成 Kotlin 对象？</p><p>答案在 <code>Ruleset.load</code>。规则集类的字段与文件名一一对应，这个对应关系由 <code>RulesetFile</code> 枚举声明：</p><pre><code><span class="comment">// Ruleset.kt 中的 RulesetFile 枚举（部分）。</span>
+<span class="comment">// 每个枚举项声明文件名，以及从 Ruleset 的哪个字段取对象。</span>
+Buildings("Buildings.json", { buildings.values.asSequence() }),
+Terrains("Terrains.json", { terrains.values.asSequence() }),
+Units("Units.json", { units.values.asSequence() }),
+
+<span class="comment">// Ruleset 中存放内容的字段（部分）。</span>
+val buildings = LinkedHashMap&lt;String, Building&gt;()
+val terrains = LinkedHashMap&lt;String, Terrain&gt;()
+val units = LinkedHashMap&lt;String, BaseUnit&gt;()</code></pre><p class="source"><a href="../../core/src/com/unciv/models/ruleset/Ruleset.kt">本地 Ruleset.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Ruleset.kt#L49">RulesetFile · L49</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Ruleset.kt#L128">字段 · L128</a></p></div></div>
+<h3>load 逐个文件读进字段</h3>
+<div class="paired"><div><pre><code><span class="comment">// Ruleset.load 的部分代码：按文件名读 JSON 并填进对应字段。</span>
+fun load(folderHandle: FileHandle) {
+    fun RulesetFile.file() = folderHandle.child(filename)
+
+    val buildingsFile = RulesetFile.Buildings.file()
+    if (buildingsFile.exists()) buildings += createHashmap(
+        json().fromJsonFile(Array&lt;Building&gt;::class.java, buildingsFile))
+
+    val unitsFile = RulesetFile.Units.file()
+    if (unitsFile.exists()) units += createHashmap(
+        json().fromJsonFile(Array&lt;BaseUnit&gt;::class.java, unitsFile))
+    <span class="comment">// ...其余文件类似：逐个存在则读，不存在就跳过</span>
+}
+
+<span class="comment">// createHashmap：按 name 建表，顺便记下对象来自哪个规则集。</span>
+private inline fun &lt;reified T : INamed&gt; createHashmap(items: Array&lt;T&gt;): LinkedHashMap&lt;String, T&gt; {
+    val hashMap = LinkedHashMap&lt;String, T&gt;(items.size)
+    for (item in items) {
+        val itemName = try { item.name }
+        catch (_: Exception) { throw Exception("${T::class.simpleName} is missing a name!") }
+        hashMap[itemName] = item
+        (item as? IRulesetObject)?.originRuleset = name
+    }
+    return hashMap
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Ruleset.kt#L369">Ruleset.load · L369、L399</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Ruleset.kt#L205">createHashmap · L205</a></p></div><div><p>读出的是 <code>Array&lt;Building&gt;</code> 这样的对象数组，libGDX 的 JSON 库按字段名把 JSON 填进对象。数组里的每个建筑按 <code>name</code> 存进 <code>LinkedHashMap</code>，之后代码用 <code>ruleset.buildings["Granary"]</code> 按名字取。</p><p><code>originRuleset</code> 记下定义来源，供翻译、报错和模组覆盖时使用。为什么用 <code>LinkedHashMap</code> 而不是 HashMap？源码注释强调过顺序：定义文件里的先后（比如时代顺序）不能丢，普通 HashMap 不保证遍历顺序。</p><p>还有两类特殊处理：科技带层级，先读列再展开成 <code>technologies</code> 表；内置规则集缺省的文件（如没有 Ruins.json）会从 Vanilla 里补一份兜底，保证游戏始终有完整定义。</p></div></div>
+<h3>启动时由 RulesetCache 加载并缓存</h3>
+<div class="paired"><div><pre><code><span class="comment">// RulesetCache.loadRulesets 的部分代码。</span>
+<span class="comment">// 加载模组很贵，所以只在启动时做一次，把结果存进缓存。</span>
+object RulesetCache : HashMap&lt;String, Ruleset&gt;() {
+    fun loadRulesets(consoleMode: Boolean = false, noMods: Boolean = false): List&lt;String&gt; {
+        val newRulesets = ConcurrentHashMap&lt;String, Ruleset&gt;()
+        fun getBuiltinRulesetFileHandle(ruleset: BaseRuleset): FileHandle {
+            val fileName = "jsons/${ruleset.fullName}"
+            return if (consoleMode) FileHandle(fileName)
+            else Gdx.files.internal(fileName)
+        }
+        fun loadBuiltinRuleset(ruleset: BaseRuleset) {
+            val fileHandle = getBuiltinRulesetFileHandle(ruleset)
+            newRulesets[ruleset.fullName] = Ruleset().apply {
+                name = ruleset.fullName
+                load(fileHandle)
+            }
+        }
+        <span class="comment">// 两个内置规则集并行加载；必须先就位，</span>
+        <span class="comment">// 模组缺省的部分才能从它们兜底补齐。</span>
+        Concurrency.parallelize(builtinRulesetTasks, parallel)
+        this.putAll(newRulesets)
+        <span class="comment">// ...再并行加载 mods 目录下的每个模组</span>
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/models/ruleset/RulesetCache.kt">本地 RulesetCache.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/RulesetCache.kt#L27">loadRulesets · L27、L37、L49</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/metadata/BaseRuleset.kt#L4">BaseRuleset · L4</a></p></div><div><p>两个内置规则集的全名是 <code>"Civ V - Vanilla"</code> 和 <code>"Civ V - Gods &amp; Kings"</code>，正好对应 <code>jsons/</code> 下的目录名。<code>Gdx.files.internal</code> 读取打进包里的资源文件，控制台模式（测试等场景）则直接按路径读。</p><p>启动时机的入口在 <code>UncivGame.initialize</code>：</p><pre><code><span class="comment">// UncivGame.initialize 的部分代码：启动早期就在后台加载全部规则集。</span>
+Concurrency.run("LoadJSON") {
+    RulesetCache.loadRulesets()
+    <span class="comment">// 之后主菜单、新建游戏、读档都直接查这个缓存</span>
+}</code></pre><p><code>RulesetCache</code> 本身就是一个 <code>HashMap&lt;String, Ruleset&gt;</code>，键是规则集名字。加载完成后，整个游戏进程只有这一份内置规则集定义；读档、开局都不再重新读 JSON。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/UncivGame.kt#L152">UncivGame.initialize · L152</a></p></div></div>
+<aside class="callout"><strong>排查思路：定义改了对局没反应？</strong><p>先分清改的是哪一份：<code>android/assets/jsons/</code> 是内置定义，游戏打包时固定；<code>mods/</code> 目录才是玩家模组。改了内置 JSON 后，旧缓存不会自己刷新——<code>loadRulesets</code> 只在启动时跑一次，模组界面改模组时才重新加载。规则集按名字缓存这一设计，正是第二课“读档只存规则集名字”能成立的前提。</p></aside>
+</section>
+
+<section id="combined"><h2>2. 每局游戏组合出自己的规则集</h2>
+<p>缓存的规则集是“全部可选规则”的静态定义。开局或读档时，<code>GameInfo.setTransients</code> 按这局的设置（基础规则集 + 启用的模组）组合出一份属于这一局的规则集。第二课已经见过这一行：</p>
+<div class="paired"><div><pre><code><span class="comment">// GameInfo.setTransients 的部分代码：按开局设置组合本局的规则集。</span>
+ruleset = RulesetCache.getComplexRuleset(gameParameters)
+
+<span class="comment">// 存档里提到的模组没有安装时，直接报错而不是默默少一套规则。</span>
+val missingMods = (listOf(gameParameters.baseRuleset) + gameParameters.mods)
+    .filterNot { it in ruleset.mods }
+if (missingMods.isNotEmpty())
+    throw MissingModsException(missingMods)
+
+<span class="comment">// 把本局规则集指回定义对象，供它们查询同规则集里的其他对象。</span>
+for (baseUnit in ruleset.units.values)
+    baseUnit.setRuleset(ruleset)
+for (building in ruleset.buildings.values)
+    building.ruleset = ruleset</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/GameInfo.kt">本地 GameInfo.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L736">getComplexRuleset · L736</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L741">缺模组检查 · L741</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L749">回指规则集 · L749、L752</a></p></div><div><p><code>gameParameters</code> 是写进存档的开局设置，里面有基础规则集名字和模组列表。所以读档后，只要规则集名字还在、缓存里还查得到，就能组合出和当初一致的定义——这正是规则定义不必写进存档的原因。</p><p>缺模组时抛 <code>MissingModsException</code>：宁可拒绝读档，也不让游戏带着残缺的规则集运行，因为后续代码会按名字查建筑、单位，查不到就是空指针或静默错误。</p><p><code>building.ruleset = ruleset</code> 值得注意：定义对象身上有指向“当前这局规则集”的可变引用。如果两局同时存在、或者模组直接改了缓存里的对象，这个回指就会混乱。Unciv 一次只处理一局游戏，所以没问题，但读源码时要意识到定义对象并非完全不可变。</p></div></div>
+<h3>组合是怎么做的</h3>
+<div class="paired"><div><pre><code><span class="comment">// RulesetCache.getComplexRuleset 的部分代码。</span>
+fun getComplexRuleset(baseRuleset: Ruleset,
+                      extensionRulesets: Iterable&lt;Ruleset&gt;): Ruleset {
+    val newRuleset = Ruleset()
+    <span class="comment">// 模组在前、基础规则集最后加入，同名对象由模组覆盖基础定义。</span>
+    for (mod in loadedMods.sortedByDescending { it.modOptions.isBaseRuleset }) {
+        ...
+        newRuleset.add(mod)
+        newRuleset.mods += mod.name
+    }
+    newRuleset.updateBuildingCosts() <span class="comment">// 全部加入后才能算建筑费用</span>
+    newRuleset.updateResourceTransients()
+    return newRuleset
+}
+
+<span class="comment">// Ruleset.add 的部分代码：把另一个规则集的内容并入，同名覆盖。</span>
+fun add(ruleset: Ruleset) {
+    buildings.putAll(ruleset.buildings)
+    ...
+    units.putAll(ruleset.units)
+}
+
+<span class="comment">// getVanillaRuleset 每次都复制一份新容器再交出去。</span>
+fun getVanillaRuleset() = this[BaseRuleset.Civ_V_Vanilla.fullName]!!.clone()
+    <span class="comment">// 防止调用方误改缓存里的基础规则集</span></code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/RulesetCache.kt#L148">getComplexRuleset · L148、L165、L179</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/RulesetCache.kt#L112">getVanillaRuleset · L112</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Ruleset.kt#L219">Ruleset.add · L219、L234</a></p></div><div><p>组合出的 <code>newRuleset</code> 是一个全新的容器：它的 <code>buildings</code>、<code>units</code> 等 Map 都是新的，先并入模组内容，基础规则集最后放入，同名定义被模组覆盖。建筑费用不能在每个文件读完后立刻算，因为模组可能改科技列；所以放到全部加入之后统一算。</p><p>细看 <code>putAll</code>：放进新 Map 的是<strong>同一个 Building 对象的引用</strong>。也就是说，缓存的静态定义对象和每局规则集里的定义对象是同一批实例，只有“容器”（Map 本身）每局一份。这样几千个定义对象不用每局复制一遍；代价是任何一处修改都会影响其他引用者，所以约定“定义对象只读”。<code>getVanillaRuleset</code> 每次都 clone 新容器再交出去，就是这个约定的保险。</p></div></div>
+<aside class="callout tradeoff"><strong>设计取舍：静态定义共享，实例容器隔离</strong><p>如果每局复制全部定义对象，开局和读档都会变慢，内存也翻倍。Unciv 的选择是：<strong>定义对象共享、每局只建新容器</strong>。这带来一条纪律：不要修改定义对象本身；要“改规则”只能换一份定义（模组覆盖同名对象），或把运行时状态写在别处。上一课 <code>City.tiles</code> 存坐标不存对象，是同一个思路：数据只有一份，容器和引用分开。Godot 里多场景共享同一份自定义 <code>Resource</code> 时规则相同：改模板影响所有引用者，实例数据要放在各自对象里。<a href="https://docs.godotengine.org/en/stable/tutorials/scripting/resources.html">Godot 官方 Resource 说明</a>。</p></aside>
+</section>
+
+<section id="unique"><h2>3. 一行 unique 从字符串变成对象</h2>
+<p>JSON 里的 <code>uniques</code> 是字符串数组。Unciv 没有在加载时把每一条都解析成对象，而是<strong>第一次被访问时才解析</strong>。先看解析逻辑，再看惰性藏在哪里。</p>
+<div class="paired"><div><pre><code><span class="comment">// Unique 构造时立即完成的解析（部分字段）。</span>
+class Unique(val text: String, ...) {
+    <span class="comment">// 把参数压成 []，得到这条规则的“模板”。例如：</span>
+    <span class="comment">// "[+1 Food] from [Deer] tiles [in this city]"</span>
+    <span class="comment">//   → "[stats] from [tileFilter] tiles [cityFilter]"</span>
+    val placeholderText = text.getPlaceholderText()
+    <span class="comment">// 参数依次取出：["+1 Food", "Deer", "in this city"]</span>
+    val params = text.getPlaceholderParameters()
+    <span class="comment">// 按模板查枚举，得到类型：StatsFromTiles</span>
+    val type = UniqueType.uniqueTypeMap[placeholderText]
+    <span class="comment">// 尖括号里的 &lt;when ...&gt; 等修饰语单独解析成 modifiers</span>
+    val modifiers: List&lt;Unique&gt; = text.getModifiers()
+}
+
+<span class="comment">// UniqueType 枚举中的对应条目（部分）。</span>
+StatsFromTiles("[stats] from [tileFilter] tiles [cityFilter]",
+    UniqueTarget.Global, UniqueTarget.FollowerBelief),
+
+<span class="comment">// 枚举声明完后建立“占位文本 → 枚举项”的查找表。</span>
+val uniqueTypeMap: Map&lt;String, UniqueType&gt; = entries.associateBy { it.placeholderText }</code></pre><p class="source"><a href="../../core/src/com/unciv/models/ruleset/unique/Unique.kt">本地 Unique.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unique/Unique.kt#L19">Unique · L19、L22</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unique/UniqueType.kt#L50">StatsFromTiles · L50</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unique/UniqueType.kt#L1210">uniqueTypeMap · L1210</a></p></div><div><p>左侧第一段是解析核心。<code>getPlaceholderText</code> 先把尖括号修饰语摘掉，再把每个 <code>[...]</code> 里的参数替换成 <code>[]</code>，剩下只含方括号骨架的“模板”；<code>getPlaceholderParameters</code> 按顺序取出参数。粮仓那条规则的模板和参数，就写在字段上方的注释里。</p><p>模板是查找键：左侧第二段声明 <code>StatsFromTiles</code> 枚举项时，自带的文本正是模板本身；第三段在启动时把全部枚举项建成 <code>uniqueTypeMap</code> 对照表。于是 <code>type = uniqueTypeMap[placeholderText]</code> 这一行查表，粮仓的模板 <code>"[stats] from [tileFilter] tiles [cityFilter]"</code> 命中 <code>StatsFromTiles</code>，这条字符串就有了类型；参数 <code>"+1 Food"</code>、<code>"Deer"</code>、<code>"in this city"</code> 留给使用点取数，第 5 节会看到它们各自做了什么。<code>UniqueType</code> 枚举有 600 多个条目，每条声明了自己的模板和可挂载的目标。</p><p>最后一行 <code>modifiers</code> 单独处理尖括号里的条件修饰语，带条件的规则看下面的例子。</p></div></div>
+<p>带条件的规则把条件放进尖括号，主句和修饰语各自解析成 Unique：</p>
+<pre><code><span class="comment">// GlobalUniques.json 中的一条：快乐度在 -10 到 -1 之间时，</span>
+<span class="comment">// 全城人口增长减少 75%。</span>
+"[-75]% growth [in all cities] &lt;when between [-10] and [-1] [Happiness]&gt;"</code></pre>
+<p>主句模板命中 <code>GrowthPercentBonus</code>；修饰语 <code>when between ...</code> 解析成独立的 <code>modifiers</code>，查询时才判定当前快乐度是否落在区间内——这个判定在第 4 节。</p>
+<p class="source"><a href="../../android/assets/jsons/Civ V - Vanilla/GlobalUniques.json">本地 GlobalUniques.json</a><a href="../../core/src/com/unciv/models/translations/Translations.kt">本地 Translations.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/translations/Translations.kt#L493">getPlaceholderText · L493</a></p>
+<h3>解析为什么是惰性的</h3>
+<div class="paired"><div><pre><code><span class="comment">// RulesetObject 中唯一对象的惰性解析（部分代码）。</span>
+abstract class RulesetObject : IRulesetObject {
+    <span class="comment">// JSON 里的原始字符串；定义对象之间的覆盖也改这个列表。</span>
+    override var uniques = ArrayList&lt;String&gt;()
+
+    <span class="comment">// 第一次访问时把字符串解析成 Unique 对象，之后复用。</span>
+    @delegate:Transient
+    override val uniqueObjects: List&lt;Unique&gt; by lazy(::uniqueObjectsProvider)
+    @delegate:Transient
+    override val uniqueMap: UniqueMap by lazy(::uniqueMapProvider)
+}
+
+<span class="comment">// IHasUniques 中的解析实现（部分代码）。</span>
+fun uniqueObjectsProvider(uniques: List&lt;String&gt;): List&lt;Unique&gt; {
+    if (uniques.isEmpty()) return emptyList()
+    return uniques.map { Unique(it, getUniqueTarget(), name) }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/models/ruleset/RulesetObject.kt">本地 RulesetObject.kt · L14</a><a href="../../core/src/com/unciv/models/ruleset/unique/IHasUniques.kt">本地 IHasUniques.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unique/IHasUniques.kt#L32">uniqueObjectsProvider · L32</a></p></div><div><p>启动时载入了几千个定义对象，多数规则的唯一对象只在被查询（城市建成建筑、界面显示描述）时才会用到。惰性解析让没被用到的字符串保持原样，不产生对象；正则解析还很贵，解析一次后用 <code>lazy</code> 缓存住。</p><p><code>@delegate:Transient</code> 作用在 lazy 委托上：存档序列化时跳过这个计算属性，反序列化时它仍处于“未解析”状态，下次访问才解析。这和第二课“缓存要在读档后重建”是同一套机制，只是这里的缓存能安全地自己懒加载。</p><p>解析结果按类型分组放进 <code>UniqueMap</code>，查询时不需要遍历全部规则，直接按类型取列表。分组时同一条 Unique 对象同时进两个表：按类型查的表和按模板查的表，两份表共享同一批列表对象以省内存。类型解析失败的（拼写错、已废弃）进不了类型表，只有规则校验器会报告它。</p></div></div>
+<aside class="callout tradeoff"><strong>设计取舍：数据驱动 vs 硬编码</strong><p>把“粮仓给鹿地块加 1 食物”写进 JSON 而不是写死在代码里，模组作者不用改 Kotlin 就能加新建筑、改数值、覆盖官方定义。代价是字符串解析、按类型分组的查找表、拼写错误要到校验时才暴露。若规则数量很少、改动不频繁，硬编码枚举反而简单；Unciv 有 600 多种规则类型、要支持大量模组，数据驱动才划算。注意数据驱动不等于“玩家随意改”：规则文本有严格的模板语法，参数类型也由 <code>UniqueParameterType</code> 声明，校验器逐条对照检查。</p></aside>
+</section>
+
+<section id="instance"><h2>4. 规则进入对局：建成建筑的那一刻</h2>
+<p>定义对象一直在缓存里，但一条规则要影响游戏，必须先进入这局的状态。对建筑来说，关键时刻是建成和拆除：城市把已建建筑的 Unique 对象收集进自己的一个 Map。</p>
+<div class="paired"><div><pre><code><span class="comment">// CityConstructions 中存放已建建筑规则的字段。</span>
+val builtBuildingUniqueMap = UniqueMap()
+
+<span class="comment">// 建成或拆掉建筑后重建这份 Map（部分代码）。</span>
+private fun updateUniques(onLoadGame: Boolean = false) {
+    builtBuildingUniqueMap.clear()
+    for (building in getBuiltBuildings())
+        builtBuildingUniqueMap.addUniques(building.uniqueObjects)
+    if (!onLoadGame) {
+        <span class="comment">// 可能是港口等改变商路连接的建筑，重新检查首都连接。</span>
+        city.civ.cache.updateCitiesConnectedToCapital(false)
+        city.cityStats.update() <span class="comment">// 城市产出缓存立即重算</span>
+        city.civ.cache.updateCivResources()
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/CityConstructions.kt">本地 CityConstructions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L71">builtBuildingUniqueMap · L71</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityConstructions.kt#L679">updateUniques · L679</a></p></div><div><p>这里做的是“收集引用”：每栋已建建筑的 <code>uniqueObjects</code> 解析出的 Unique 对象，全部放进 <code>builtBuildingUniqueMap</code>。Unique 对象还记得自己来自哪栋建筑（<code>sourceObjectName</code>），界面显示“+1 食物来自粮仓”时用的就是它。</p><p>注意 <code>updateUniques</code> 里直接调了 <code>city.cityStats.update()</code>：拆掉粮仓、界面重新打开城市面板时，产出已经是重算过的，不用等到下一回合。规则没有“挂着持续生效”的状态，效果全在查询时得出；Map 里的内容变了，下一次查询的结果自然跟着变。</p><p>读档路径也走这里：<code>updateUniques(onLoadGame = true)</code> 重建同一份 Map，只是跳过重算（随后整套 setTransients 会统一重算）。</p></div></div>
+<h3>查询时把三层规则合起来</h3>
+<div class="paired"><div><pre><code><span class="comment">// City.forEachMatchingUnique 的部分代码。</span>
+fun forEachMatchingUnique(
+    uniqueType: UniqueType,
+    gameContext: GameContext = state,
+    includeCivUniques: Boolean,
+    op: (unique: Unique)-&gt;Unit,
+) {
+    if (includeCivUniques) {
+        civ.forEachMatchingUnique(uniqueType, gameContext, op)
+        forEachLocalMatchingUnique(uniqueType, gameContext, op)
+    } else {
+        cityConstructions.builtBuildingUniqueMap.forEachMatchingUnique(...)
+        religion.forEachMatchingUnique(...)
+    }
+}
+
+<span class="comment">// Civilization 查询规则时并入全局规则（部分代码）。</span>
+yieldAll(gameInfo.getGlobalUniques().getMatchingUniques(uniqueType, gameContext))</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/City.kt">本地 City.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L647">forEachMatchingUnique · L647</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/Civilization.kt#L629">全局规则并入 · L629</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L274">getGlobalUniques · L274</a></p></div><div><p><code>forEachMatchingUnique</code> 回答“这个城市有哪些规则生效”——这不是一个单一字段，而是查询时临时拼出来的两层，文明那层还会并入全局规则：</p><ul><li><strong>文明规则</strong>：<code>civ.forEachMatchingUnique</code> 查民族特性、政策等；文明的查询里又并入 <code>getGlobalUniques()</code>，快乐度惩罚那类对所有文明生效的规则就走这里。</li><li><strong>城市本地规则</strong>：<code>forEachLocalMatchingUnique</code> 查已建建筑的 <code>builtBuildingUniqueMap</code> 和城市信仰。粮仓的规则在这一层，所以效果只在拥有粮仓的城市出现。</li></ul><p><code>includeCivUniques</code> 为 false 时只查本地规则，对应左侧的 else 分支。</p></div></div>
+<h3>查出来的规则还要过两道关</h3>
+<div class="paired"><div><pre><code><span class="comment">// UniqueMap.getMatchingUniques 的部分代码：查出来还不够。</span>
+getUniques(uniqueType)
+    .flatMap {
+        when {
+            it.isTimedTriggerable -&gt; emptySequence()
+            <span class="comment">// &lt;when ...&gt; 不满足就跳过这条规则</span>
+            !it.conditionalsApply(state) -&gt; emptySequence()
+            <span class="comment">// 按 &lt;for every ...&gt; 等条件乘出条数</span>
+            else -&gt; it.getMultiplied(state)
+        }
+    }</code></pre><p class="source"><a href="../../core/src/com/unciv/models/ruleset/unique/UniqueMap.kt">本地 UniqueMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unique/UniqueMap.kt#L81">getMatchingUniques · L81</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unique/Unique.kt#L89">conditionalsApply · L89</a></p></div><div><p>三层来源只是初筛，取到的每条规则还要过两道关。</p><p>第一道是条件：<code>conditionalsApply</code> 拿上下文判定 <code>&lt;when ...&gt;</code> 修饰语。比如快乐度不在 -10 到 -1 之间，第 3 节那条“-75% 增长”就被跳过。条件不满足时静默返回空，是“规则在但没效果”的常见原因。</p><p>第二道是倍率：<code>getMultiplied</code> 按 <code>&lt;for every ...&gt;</code> 之类修饰语把一条规则展开成多条。</p><p>两道关用的上下文都装在 <code>GameContext</code> 里：城市、地块、文明、单位等对象，以及“忽略条件”之类的开关。查询方构造它，被查询的规则拿它回答“现在满足吗”。</p></div></div>
+<aside class="callout"><strong>排查思路：规则没生效，分三层问</strong><p>① 定义里有没有这条规则？去 JSON 和 <code>uniqueObjects</code> 看字符串，注意模板必须与 <code>UniqueType</code> 的写法完全一致；② 规则有没有进入这局？建筑建成了吗、它的 Unique 在 <code>builtBuildingUniqueMap</code> 里吗；③ 使用点有没有查这个类型、条件是否满足？条件不满足时 <code>getMatchingUniques</code> 会静默返回空，表现就是“规则在但没效果”。按定义、进入、查询的顺序查，比盯着使用点乱猜快得多。</p></aside>
+</section>
+
+<section id="use"><h2>5. 使用点：一块地的产出怎样加上 1 食物</h2>
+<p>最后一站：哪段代码在“执行”粮仓的效果？答案是城市重算产出时，对每块有人工作的地逐条套规则。分三步看：先看遍历了哪些地块，再看查出了什么规则，最后看规则怎样套到当前地块上。</p>
+<h3>第一步：只统计有人工作的地块</h3>
+<div class="paired"><div><pre><code><span class="comment">// CityStats.updateTileStats 的部分代码。</span>
+<span class="comment">// 过滤条件里还有城市中心、免人口的地块改良，这里省略。</span>
+fun updateTileStats() = timeThis("updateTileStats") {
+    val stats = Stats()
+    val workedTiles = city.tilesInRange.asSequence()
+        .filter { city.location.toHexCoord() == it.position
+            || city.isWorked(it) || ... }
+    for (tile in workedTiles) {
+        val tileStats = tile.stats.getTileStats(city, city.civ)
+        stats.add(tileStats)
+    }
+    statsFromTiles = stats
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/CityStats.kt">本地 CityStats.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L349">updateTileStats · L349、L365</a></p></div><div><p>重算城市产出时，先筛出有人工作的地块，然后对<strong>每一块</strong>调用 <code>getTileStats(city, city.civ)</code>，把算出的产出累计进 <code>statsFromTiles</code>。</p><p>这就是粮仓效果范围的答案：<strong>粮仓不加给城市里所有鹿地块，只加给走进这个循环的地块</strong>。有鹿但没人工作的地块不参与统计，自然拿不到那 1 食物。规则条件里没有“被工作”这一项——是使用点的遍历范围决定的，这呼应第二课“控制”与“工作”的区别。</p></div></div>
+<h3>第二步：查出这座城市有哪些地块规则</h3>
+<div class="paired"><div><pre><code><span class="comment">// TileStatFunctions.getTileStatsBreakdown 的部分代码。</span>
+<span class="comment">// 用当前地块和城市构造判定场景。</span>
+val gameContext = GameContext(civInfo = observingCiv, city = city, tile = tile)
+
+if (city != null) {
+    <span class="comment">// 取出所有“从地块获得产出”的规则，逐条套到这块地上；</span>
+    <span class="comment">// addStats 见下一步。</span>
+    city.forEachMatchingUnique(UniqueType.StatsFromTiles, gameContext) { unique: Unique -&gt;
+        if (city.matchesFilter(unique.params[2])) addStats(unique)
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/TileStatFunctions.kt">本地 TileStatFunctions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L57">getTileStatsBreakdown · L57、L81</a></p></div><div><p><code>GameContext</code> 装着判定条件要用的对象：这块地、这座城、观察者文明。后面所有“现在满足吗”的判断都拿它当参考。</p><p><code>forEachMatchingUnique(StatsFromTiles, ...)</code> 就是第 4 节的查询入口：粮仓建成了，<code>builtBuildingUniqueMap</code> 里有它的规则，这里就取得到；拆掉了就取不到，所以效果立刻消失。</p><p>取到的每条规则先查 <code>params[2]</code>——粮仓写的是 <code>"in this city"</code>——匹配当前城市，才进入下一步。</p></div></div>
+<h3>第三步：这块地匹配吗？匹配就加产出</h3>
+<div class="paired"><div><pre><code><span class="comment">// 同一个方法里 addStats 的部分代码。</span>
+<span class="comment">// 对地块改良、道路的两个分支，这里省略。</span>
+val addStats: (Unique) -&gt; Unit = { unique: Unique -&gt;
+    val tileType = unique.params[1]
+    <span class="comment">// 当前这块地匹配 params[1]（粮仓写的是 "Deer"）吗？</span>
+    if (tile.matchesFilter(tileType, observingCiv))
+        listOfStats.add("${unique.sourceObjectName}" to unique.stats)
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/TileStatFunctions.kt#L72">addStats · L72、L80</a></p></div><div><p><code>params[1]</code>（<code>"Deer"</code>）是地块过滤器，<code>tile.matchesFilter</code> 拿它问“正在计算的这块地是鹿地块吗”。是，就把 <code>unique.stats</code> 加进这块地的产出——这份 Stats 正是第 3 节解析 <code>params[0]</code>（<code>"+1 Food"</code>）得到的 1 点食物。</p><p><code>sourceObjectName</code> 记着这条规则来自粮仓；界面展示“+1 食物（粮仓）”用的就是它，与第 4 节收集引用时是同一个字段。</p></div></div>
+<p>三个参数在第二步和第三步里各司其职：</p>
+<table><thead><tr><th scope="col">参数</th><th scope="col">粮仓里的值</th><th scope="col">读取它的代码</th><th scope="col">作用</th></tr></thead><tbody>
+<tr><td>params[0]</td><td>"+1 Food"</td><td>unique.stats（第 3 节解析）</td><td>要加的产出</td></tr>
+<tr><td>params[1]</td><td>"Deer"</td><td>tile.matchesFilter</td><td>限定哪些地块</td></tr>
+<tr><td>params[2]</td><td>"in this city"</td><td>city.matchesFilter</td><td>限定哪座城市</td></tr>
+</tbody></table>
+<p>规则的“类型”只决定在哪个使用点被查询，参数的含义完全由使用点解释。想加一条新效果，就要有新类型、新使用点和校验规则，三者配套。</p>
+<p>再看一次完整链路：定义在 JSON，加载进缓存，组合进本局规则集；建成建筑时 Unique 对象进入城市的 <code>builtBuildingUniqueMap</code>；算产出时使用点带着 GameContext 查询、逐条套用。静态定义与对局实例的交界就在 <code>updateUniques</code> 这一站：之前的对象全游戏共享，之后的 Map 属于这一局、这一城。</p>
+<aside class="callout"><strong>Godot 对照：把效果查询放进结算循环</strong><p>同样的结构在 Godot 4 C# 里可以这样做：规则模板放共享 <code>Resource</code>（含效果类型、参数、条件）；存档和场景里只存“已建造什么”的 ID 列表；算产出时由一个结算器遍历工作地块，对每个“已生效规则”求值。关键点和 Unciv 一致：<strong>规则自己不主动运行，结算器在确定的时机查询它</strong>。这样“效果何时生效、对谁生效”由结算代码统一决定，规则只声明内容和条件，新增规则不改动结算循环。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>规则定义住在 jsons 目录的 JSON 文件里，启动时由 RulesetCache 一次性加载并缓存；对局存档只保存规则集的名字。</strong></li><li><strong>每局通过 getComplexRuleset 组合出新的 Ruleset 容器，定义对象与缓存共享同一批实例；约定定义只读，改规则靠模组覆盖。</strong></li><li><strong>JSON 里的 unique 是字符串，第一次访问才解析成 Unique 对象：placeholderText 压参数查类型，params 供使用点取数。</strong></li><li><strong>规则进入对局的桥是 builtBuildingUniqueMap：建成时加入、拆除时重建，并立即重算城市产出。</strong></li><li><strong>查询规则都带 GameContext：条件修饰语不满足就跳过，倍率修饰语把一条规则展开成多条。</strong></li><li><strong>规则自己不运行；使用点决定何时查询、套在哪些对象上。粮仓只对有人工作的鹿地块生效，正是使用点遍历范围决定的。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；能画出定义到效果的完整链路、预测一个新场景，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="a"><fieldset><legend>1. 粮仓的 uniques 定义存放在哪里？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="Buildings.json 里的 uniques 数组就是规则定义的存放处；启动时由 RulesetCache 读进内存。"><span>粮仓的定义文件中</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="存档只保存规则集名字和已建建筑列表，规则文本来自 JSON 定义文件。"><span>这座城市的存档中</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="地块产出缓存存的是结算结果，不是规则定义；规则在 Buildings.json 里。"><span>工作地块的缓存里</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="画面图层只负责显示；规则定义在 jsons 目录的 JSON 文件里。"><span>游戏画面的图层中</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>2. 一条 unique 靠什么找到它的类型？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="参数压成 [] 后的 placeholderText 是查找键，查 uniqueTypeMap 得到 StatsFromTiles 等枚举项。"><span>解析后的占位文本</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="uniques 是字符串数组，位置与类型无关；关键是参数压掉后的模板文本。"><span>字符串在列表位置</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="originRuleset 只记定义来自哪个规则集，不参与类型查找。"><span>存档中的来源字段</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="类型由模板文本匹配 UniqueType 枚举，不靠名字前缀约定。"><span>规则集的名字前缀</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="b"><fieldset><legend>3. 建成粮仓后，它的 Unique 对象进入哪里？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="单位的能力表存的是单位升级和效果，与已建建筑无关。"><span>单位的当前能力表</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="updateUniques 把已建建筑的 uniqueObjects 收进 builtBuildingUniqueMap。"><span>城市的已建建筑图</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="规则集缓存是静态定义，建成建筑只影响对局里的城市。"><span>地图的规则集缓存</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="科技管理器管研究进度，不管建筑效果；进的是城市构造管理里的 Map。"><span>文明的科技管理器</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>4. 查询规则时 GameContext 起什么作用？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="规则定义都存在 Ruleset 及其 JSON 文件里，不在 GameContext。"><span>存储所有规则定义</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="GameContext 不缓存历史结果；它携带城市、地块、文明等当前对象。"><span>缓存上一回合结果</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="conditionalsApply 用 GameContext 判定 &lt;when ...&gt; 修饰语是否满足。"><span>携带判定所需场景</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="界面选项与规则判定无关；GameContext 为条件判定提供当前对局对象。"><span>保存界面显示选项</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：粮仓的定义文件中；2：解析后的占位文本；3：城市的已建建筑图；4：携带判定所需场景。分别对应 <a href="#definitions">JSON 定义</a>、<a href="#unique">unique 解析</a>、<a href="#instance">进入对局</a>、<a href="#instance">条件判定</a>。</p></details>
+<h3>练习 A · 重画一条规则的旅程（3 分钟）</h3><p>不看正文，画出“粮仓给鹿地块加 1 食物”从定义到生效的关键站点，并标出每一站里哪个东西是静态共享、哪个属于这局游戏。</p><details class="rubric"><summary>展开核对要点</summary><pre><code>Buildings.json "uniques":["[+1 Food] from [Deer] tiles [in this city]"]
+  → Ruleset.load → buildings["Granary"]（定义对象，全局共享）
+  → RulesetCache（内置规则集缓存，进程内一份）
+  → getComplexRuleset → 本局 ruleset（新容器，共享同一批定义对象）
+  → CityConstructions.updateUniques → builtBuildingUniqueMap（属于这一城）
+  → CityStats.updateTileStats → 逐块地 getTileStats
+      → city.forEachMatchingUnique(StatsFromTiles, gameContext)
+      → 地块匹配 "Deer" → stats +1 Food</code></pre><p>六个站点、静态与对局的交界（updateUniques）都要画对。忘了条件判定就回到 <a href="#instance">第 4 节</a>，忘了使用点就回到 <a href="#use">第 5 节</a>。</p></details>
+<h3>练习 B · 预测粮仓的效果（4 分钟）</h3><p>城市 A 建成粮仓，工作 2 块鹿地块、1 块小麦地块；城市 B 没有粮仓，工作 1 块鹿地块。哪些地块的产出会多 1 食物？为什么小麦地块不会？拆掉粮仓后立刻打开城市面板，产出还是旧数值吗？</p><details class="rubric"><summary>展开答案与分析</summary><p>只有 A 的两块鹿地块各 +1 食物。小麦不匹配 <code>params[1]</code> 的 <code>"Deer"</code>；B 没有粮仓，<code>builtBuildingUniqueMap</code> 里没有这条规则，取不到。拆掉粮仓走 <code>removeBuilding → updateUniques</code>，Map 重建，且 <code>city.cityStats.update()</code> 当场重算，重新打开面板看到的已经是新数值，不必等下一回合。关键结论：规则的效果是查询时得出的，Map 变了结果立刻变。</p></details>
+<h3>练习 C · 沿另一条 unique 追到使用点（4 分钟）</h3><p>Buildings.json 里 Temple of Artemis（阿尔忒弥斯神庙）有一条 <code>"[+15]% Production when constructing [Archery] units [in this city]"</code>。先确定它的 UniqueType，再在源码里找到它的使用点，说明它何时、对什么生效。</p><details class="rubric"><summary>展开核对要点</summary><p>参数压掉后模板是 <code>"[relativeAmount]% Production when constructing [baseUnitFilter] units [cityFilter]"</code>，对应 <code>PercentProductionUnits</code>。使用点在 <code>CityStats.getStatsPercentBonusesFromUniquesBySource</code>：当前在建项目是 <code>BaseUnit</code> 时取这个类型的规则，<code>params[1]</code>（Archery）匹配在建单位、<code>params[2]</code> 匹配城市，命中就把 <code>params[0]</code>（+15）加进生产力加成。所以它只在本城正在建造射术类单位时生效；建其他东西时不参与。<a href="../../core/src/com/unciv/logic/city/CityStats.kt">CityStats.kt · L264 附近</a>。</p></details>
+<h3>选读练习 · 一条拼写错误的规则会发生什么（2 分钟）</h3><p>模组作者把 <code>"[+1 Food] from [Deer] tiles [in this city]"</code> 写成了 <code>"[+1 Food] from [Dear] tiles [in this city]"</code>。加载会报错吗？游戏里这条效果还在吗？</p><details class="rubric"><summary>展开答案</summary><p>加载不报错——<code>Ruleset.load</code> 只把字符串读进来，不逐条解析；解析是惰性的。解析时模板仍能匹配 <code>StatsFromTiles</code>（占位符的位置没变），所以类型正常，效果也在，只是 <code>params[1]</code> 变成了 <code>"Dear"</code>，永远匹配不到任何地块，规则静默失效。靠规则校验器（RulesetValidator 对照参数类型和已知名字）才能提前发现这类问题；这正是模组界面检查模组链接时要跑校验的原因。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/Ruleset.kt#L369">Ruleset.load</a>，从上往下数一遍它读了多少个文件；然后看 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/RulesetCache.kt#L148">RulesetCache.getComplexRuleset</a> 的组合过程，最后在 <a href="../../core/src/com/unciv/logic/map/tile/TileStatFunctions.kt">TileStatFunctions.kt</a> 里把粮仓的规则再走一遍。想多了解一个类型，就去 <a href="../../core/src/com/unciv/models/ruleset/unique/UniqueType.kt">UniqueType.kt</a> 搜一条规则的模板，再跟着 <a href="../../core/src/com/unciv/models/ruleset/unique/UniqueMap.kt">UniqueMap</a> 看查询。</p><p>下次学习前，用两分钟重画练习 A；约一周后再做练习 B 和 C。如果记得类型名却说不出它在哪里被查询，翻一下<a href="reference/architecture.html#ruleset">规则集与 Unique 速查</a>，弄清卡住的地方后合上资料再试一次。</p><p>有不清楚的步骤，可以直接问教学助手。说说你读到了哪个方法、现在怎么理解、哪里想不通，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="reference/architecture.html">架构与术语速查</a><a href="0004-reading-with-evidence.html">下一课：怎样用证据读源码</a></div></section>
+<footer>资料核对：2026-09-10。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。</footer>
+</main></div>
+</body>
+</html>

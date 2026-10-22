@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>04 · 怎样用证据读源码 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>04 / 怎样用证据读源码</strong><a href="#goal">目标、回顾与场景</a><a href="#tests-source">1. 测试也是一等源码</a><a href="#assert">2. 断言：输入、预期、断点</a><a href="#testgame">3. TestGame 造最小对局</a><a href="#loadgame">4. 读档测试与真实存档</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 50～60 分钟<br>需先完成前三课<br>含源码走读与练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第一阶段 / 建立全局模型</div>
+<h1>怎样用证据读源码</h1>
+<p class="lead">前三课是“追着源码读”：按钮到下一回合、数据归谁、一条规则怎样进入游戏。这一课换一个入口——从测试读起。测试是项目里另一批一等公民源码，它既记录了“这段代码该怎么用”，也留下了“我改这里会破坏什么”的证据。学会读测试，就是把“我觉得对”换成“断言过了吗”。</p>
+<p class="meta">需要的基础：前三课的运行链、三类数据和规则链，以及基础 Kotlin。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>先给一个场景：你怀疑卖建筑时黄金加得不对，想验证，又不想启动整个游戏去点半天。Unciv 的答案是把最小的一局游戏“摆”进内存，用一个测试跑一遍卖建筑，再断言黄金增加了 4。测试就是源码的“可执行说明书”——它替你准备好输入，告诉你预期，还指出关键断点在哪一行。</p>
+<h3>先找回前三课的一条主线</h3>
+<p>第一课追了按钮到新局面的调用链；第二课把数据分成状态、规则定义、运行时引用三类；第三课追了一条规则从 JSON 到产出加一的全程。这三课的共同点是<strong>顺着调用读</strong>。这一课反过来：<strong>从断言倒着读</strong>——测试先告诉你“结果必须是什么”，你再回到源码找“为什么是这个结果”。</p>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>测试在哪：</strong>测试源码放在哪里，运行需要什么环境？</li><li><strong>断言说明什么：</strong>一条测试的输入、预期和关键断点分别是什么？</li><li><strong>怎么用起来：</strong>读档测试怎样用真实存档当证据，我又怎么在本地跑通？</li></ul><p>读测试时记住这条主线：<strong>给定（given）→ 执行（when）→ 断言（then）</strong>。每一条断言都是一个“预期”：它失败，说明某段代码没有按预期走。</p></div><div><h3>先认识四个概念</h3><ul><li><strong>测试运行器（Test Runner）：</strong>启动并运行测试的壳。Unciv 多数测试用 <code>BaseTestRunner</code>，直接在调用线程上跑，不启动游戏窗口；需要 GL 上下文的才用 <code>GdxTestRunner</code>。</li><li><strong>TestGame：</strong>测试专用的一局最小游戏工厂，造规则集、地图、文明、城市和单位，全在内存里。</li><li><strong>断言（assert）：</strong>JUnit 里的检查语句，例如 <code>assertEquals(4, civ.gold)</code>；不满足就让测试失败。</li><li><strong>读档测试：</strong>拿一段真实历史存档字符串读回成 GameInfo，验证旧存档仍能还原。</li></ul><p class="source"><a href="reference/architecture.html#glossary">术语表</a><a href="../../docs/Developers/Building-Locally.md">本地构建说明</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>测试入口与运行环境</td><td>10 分钟</td><td>测试放哪里，工作目录为何指向 assets</td></tr><tr><td>输入、预期、关键断点</td><td>12 分钟</td><td>读出 given/when/then，指出断点行</td></tr><tr><td>TestGame 与读档测试</td><td>12 分钟</td><td>最小对局怎么造，存档怎么读回</td></tr><tr><td>心智模型与推演</td><td>12～16 分钟</td><td>选一个测试写输入预期，本地跑通核验</td></tr></tbody></table>
+</section>
+
+<section id="tests-source"><h2>1. 测试也是一等源码，入口和运行环境要先找对</h2>
+<p>测试不在 <code>core/</code> 里，而在根目录的 <code>tests/src/com/unciv/</code> 下，按和主源码相同的包结构组织。课程入口列出的 <code>tests/.../testing/TestGame.kt</code> 就是测试专用的一局游戏工厂。先读它开头的类注释：</p>
+<div class="paired"><div><pre><code><span class="comment">// tests/src/com/unciv/testing/TestGame.kt 的类注释（部分）。</span>
+<span class="comment">// 一个测试用游戏：克隆 Civ_V_GnK 规则集，可在原地随意改。</span>
+<span class="comment">// 默认只有一块 Tile 的地图；要更大用 makeHexagonalMap。</span>
+<span class="comment">// 初始没有任何文明，连蛮族都没有；用 addCiv 加。</span>
+<span class="comment">// currentPlayerCiv 一开始是未初始化的占位，不能直接 nextTurn。</span>
+<span class="comment">// 改规则集的助手：createBaseUnit、createBuilding 等。</span>
+<span class="comment">// 改游戏状态的助手：addCity、addUnit、addTileToCity 等。</span>
+class TestGame(vararg addGlobalUniques: String, forUITesting: Boolean = false)</code></pre><p class="source"><a href="../../tests/src/com/unciv/testing/TestGame.kt">本地 TestGame.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/testing/TestGame.kt#L29">类注释 · L29</a></p></div><div><p>这段注释本身就是最浓缩的使用说明：默认单格地图、没有文明、规则集可改。它回答了“测试怎么开局”——不是跑完整游戏，而是把一个最小局面摆进内存，只保留要验证的那部分。</p><p>“克隆规则集可原地修改”呼应第三课：定义对象共享、只读约定。测试里克隆一份再改，既不会污染缓存，又能任意摆放要测的规则。为什么选 <code>Civ_V_GnK</code>（众神与国王）而不是香草？因为它比香草多了宗教、信仰等系统，覆盖面更广。</p></div></div>
+<h3>运行环境：工作目录指向 android/assets</h3>
+<div class="paired"><div><pre><code><span class="comment">// tests/build.gradle.kts 中 test 任务的关键配置（部分）。</span>
+tasks {
+    test {
+        workingDir = file("../android/assets")
+        testLogging.lifecycle { <span class="comment">/* 失败时打印完整堆栈 */</span> }
+        <span class="comment">// mockito 的 javaagent，配合 GdxTestRunner 里 mock GL</span>
+        jvmArgumentProviders.add(MockitoAgentArgumentProvider(mockitoAgent))
+    }
+}</code></pre><p class="source"><a href="../../tests/build.gradle.kts">本地 tests/build.gradle.kts</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/build.gradle.kts#L24">test 配置 · L24</a><a href="../../docs/Developers/Building-Locally.md">本地构建说明</a></p></div><div><p>最关键的一行是 <code>workingDir = file("../android/assets")</code>。主源码读 JSON 用的是相对路径 <code>"jsons/..."</code>（第三课见过 <code>RulesetCache</code>），游戏运行时工作目录正好是 <code>android/assets</code>；测试进程也把它当工作目录，<code>Ruleset.load</code> 才能找到内置规则集和图片等资源。</p><p>所以“可运行环境核验”不只是“能编译”，还包括<strong>工作目录、资源路径、mock 掉的图形层</strong>都各就各位。构建说明 <a href="../../docs/Developers/Building-Locally.md">Building-Locally.md</a> 的 Unit Tests 一节给出的命令是 <code>:tests:test</code>，可加 <code>--tests "com.unciv.*"</code> 缩小范围。</p></div></div>
+<aside class="callout"><strong>本机核验：这些测试确实能跑通</strong><p>本次用 Gradle MCP 实际跑了三批：<code>HexmathTests</code>（8 题全过）、<code>CityTest</code> 与 <code>LoadGameTest</code>（15 过、3 跳过、0 失败）。跳过的 3 题是 <code>LoadGameTest</code> 里标了 <code>@Ignore</code> 的存档更新工具，第 4 节会讲。你在本地可用 <code>:tests:test --tests "com.unciv.logic.city.CityTest"</code> 只跑一个类，几十秒就能看到绿条。</p></aside>
+</section>
+
+<section id="assert"><h2>2. 断言：把一条测试拆成输入、预期、关键断点</h2>
+<p>测试最典型的结构是 JUnit 的三段式，Unciv 里约定写成 <code>given / when / then</code> 注释。读任何一条测试，先问三个问题：<strong>输入是什么？预期是什么？失败时最先怀疑哪一行？</strong>用 <code>CityTest</code> 里“卖建筑”这条来做例子。</p>
+<div class="paired"><div><pre><code><span class="comment">// tests/src/com/unciv/logic/city/CityTest.kt 的一条测试。</span>
+@Test
+fun `should sell building`() {
+    <span class="comment">// given：给首都建一座纪念碑，预期卖出得 4 黄金</span>
+    val expectedMonumentSellingGoldGain = 4
+    capitalCity.cityConstructions.addBuilding("Monument")
+
+    <span class="comment">// when：卖掉这座建筑</span>
+    capitalCity.sellBuilding("Monument")
+
+    <span class="comment">// then：文明国库恰好多了 4</span>
+    assertEquals(expectedMonumentSellingGoldGain, testCiv.gold)
+}</code></pre><p class="source"><a href="../../tests/src/com/unciv/logic/city/CityTest.kt">本地 CityTest.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/city/CityTest.kt#L73">should sell building · L73</a></p></div><div><p>输入是“一座已建成纪念碑的首都”；执行是调用 <code>sellBuilding("Monument")</code>；预期是 <code>testCiv.gold == 4</code>。这条测试没有启动游戏、没有点界面，只在内存里演了一遍。</p><p>测试替读者锁住了“卖建筑”这个动作的<strong>可见后果</strong>：国库增加卖价。读到这里你还不知道“为什么是 4”，但你已经知道“必须是 4”——这就是预期。下一步顺着它进生产代码找答案。</p></div></div>
+<h3>关键断点：预期值是怎么来的</h3>
+<div class="paired"><div><pre><code><span class="comment">// core/.../city/City.kt 中卖价与卖出动作（部分代码）。</span>
+@Readonly
+fun getGoldForSellingBuilding(buildingName: String) =
+    getRuleset().buildings[buildingName]!!.cost / 10
+
+fun sellBuilding(building: Building) {
+    cityConstructions.removeBuilding(building)
+    civ.addGold(getGoldForSellingBuilding(building.name))
+    hasSoldBuildingThisTurn = true
+
+    population.unassignExtraPopulation() <span class="comment">// 释放专家槽</span>
+    population.autoAssignPopulation() <span class="comment">// 也重算城市产出</span>
+    civ.cache.updateCivResources() <span class="comment">// 可能涉及资源需求</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/City.kt">本地 City.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L540">getGoldForSellingBuilding · L540</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L548">sellBuilding · L548</a></p></div><div><p>现在答案浮出来：卖价 = 建筑成本的十分之一。测试里 <code>4</code> 这个魔法数，正是“纪念碑成本 / 10”的整数结果。如果哪天有人改了 <code>cost / 10</code> 成 <code>cost / 5</code>，这条测试立刻变红——这就是断言的回归保护作用。</p><p><strong>关键断点</strong>是断言一旦失败、你最该先看的那一行：这里是 <code>getGoldForSellingBuilding</code> 的 <code>cost / 10</code>。读测试时把“预期”和“产生预期的那行生产代码”对上，才算是读懂了这条测试，而不是只认得 <code>4</code> 这个数字。</p></div></div>
+<p>一条测试的三要素落到表格里是这样：</p>
+<table><thead><tr><th scope="col">要素</th><th scope="col">卖建筑例子里的内容</th><th scope="col">对应源码</th></tr></thead><tbody>
+<tr><td>输入（given）</td><td>首都已建成纪念碑，文明黄金为 0</td><td><code>addBuilding("Monument")</code></td></tr>
+<tr><td>执行（when）</td><td>卖掉纪念碑</td><td><code>capitalCity.sellBuilding("Monument")</code></td></tr>
+<tr><td>预期（then）</td><td>文明黄金等于 4</td><td><code>assertEquals(4, testCiv.gold)</code></td></tr>
+<tr><td>关键断点</td><td>卖价 = 成本 / 10</td><td><code>getGoldForSellingBuilding</code> 的 <code>cost / 10</code></td></tr>
+</tbody></table>
+<p>另一种断言写的是“关系”而不是“确定数值”。看人口课里的一条，它不猜增长后粮食到底剩多少，而是断言“有结转加成时剩得更多”：</p>
+<div class="paired"><div><pre><code><span class="comment">// CityPopulationManagerTest 里的结转加成测试（部分）。</span>
+fun `should start with food stored when new pop is born and uniques`() {
+    <span class="comment">// given：给城市一座“增长后保留 50% 粮食”的建筑</span>
+    val building = testGame.createBuilding(
+        "[50]% Food is carried over after population increases [in this city]")
+    city.cityConstructions.addBuilding(building)
+    city.population.foodStored = 14
+
+    <span class="comment">// when：这一回合净增 1 粮食，人口应增长</span>
+    city.population.nextTurn(1)
+
+    <span class="comment">// then：人口变 2，且结转后粮食剩 7</span>
+    assertEquals(2, city.population.population)
+    assertEquals(7, city.population.foodStored)
+}</code></pre><p class="source"><a href="../../tests/src/com/unciv/logic/city/managers/CityPopulationManagerTest.kt">本地 CityPopulationManagerTest.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/city/managers/CityPopulationManagerTest.kt#L168">结转测试 · L168</a></p></div><div><p>这里用一个 <code>createBuilding</code> 现造一条规则字符串——正是第三课讲的 unique 模板（<code>CarryOverFood</code>），测试作者不用翻 JSON，直接写进建筑。<code>nextTurn(1)</code> 是模拟“本回合粮食净增 1”，人口从 1 涨到 2。</p><p>预期 7 是这样来的：涨人口前需要 14 粮食（人口 1 的标准门槛），14 加上净增的 1 后超过门槛，先扣掉 14 剩 0，再按 50% 结转回 7。这个“7”只有读了 <code>CityPopulationManager.nextTurn</code> 里 <code>CarryOverFood</code> 那段才能对上，它把一条规则的<strong>具体数值后果</strong>钉死在测试里。</p></div></div>
+<aside class="callout tradeoff"><strong>设计取舍：确定性数值 vs 关系断言</strong><p>像 <code>4</code>、<code>7</code> 这样的确定值，好处是任何算法改动都会被立刻抓出来，坏处是规则数值一调就要跟着改测试。像 <code>assertTrue(a &lt; b)</code> 这样的关系断言更稳，但只能证明“方向对”，证明不了“多多少”。Unciv 两种都用：卖价、结转这类核心公式用确定值；难度对增长的影响用 <code>assertTrue</code> 比较大小。读测试时先分清它锁的是“值”还是“关系”，再决定改动后要不要同步更新这条测试。</p></aside>
+</section>
+
+<section id="testgame"><h2>3. TestGame：怎么造一局不启动游戏的对局</h2>
+<p>上面的测试开头都有 <code>private val testGame = TestGame()</code> 和 <code>@Before fun setUp()</code>。这就是 TestGame 的价值：它把“摆一个局面”压缩成几行。看它初始化时做了什么：</p>
+<div class="paired"><div><pre><code><span class="comment">// TestGame 构造器里的初始化（部分代码）。</span>
+init {
+    if (!forUITesting) {
+        <span class="comment">// 让 UncivGame.Current 就位，调试变量与设置可用</span>
+        UncivGame.Current = UncivGame()
+        UncivGame.Current.settings = GameSettings().apply {
+            musicVolume = 0f; soundEffectsVolume = 0f <span class="comment">// 静音</span>
+        }
+    }
+    UncivGame.Current.gameInfo = gameInfo
+
+    <span class="comment">// 克隆一份可改的规则集，并设置 gameInfo 的关键变量</span>
+    if (RulesetCache.isEmpty()) RulesetCache.loadRulesets(noMods = true)
+    ruleset = RulesetCache[BaseRuleset.Civ_V_GnK.fullName]!!.clone()
+    gameInfo.ruleset = ruleset
+    gameInfo.gameParameters.speed = Speed.DEFAULTFORSIMULATION
+    gameInfo.setGlobalTransients()
+
+    <span class="comment">// 单格地图，城市中心需要它</span>
+    gameInfo.tileMap = TileMap(0, ruleset, false)
+    tileMap.ruleset = ruleset
+    tileMap.gameInfo = gameInfo
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/testing/TestGame.kt#L50">TestGame.init · L50</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/testing/TestGame.kt#L67">克隆规则集 · L67</a></p></div><div><p>初始化做了三件事，都对应前三课的知识：第一，摆好 <code>UncivGame.Current</code> 并把音量全设成 0，让测试进程不真的发声；第二，如果规则集缓存为空就加载一次，然后 <strong>clone 出 G&amp;K 规则集</strong>并挂到 <code>gameInfo.ruleset</code>，再调 <code>setGlobalTransients</code> 把难度、速度对象补上；第三，建一块单格地图。</p><p>注意“clone”这一下正是第三课“定义对象共享、容器隔离”的保险：测试改的是副本，缓存里的原规则集不受影响。不同测试反复 <code>new TestGame()</code> 时，缓存只加载一次（<code>isEmpty()</code> 判断），后面都是廉价的 clone。</p></div></div>
+<h3>加文明、城市、单位、建筑的助手</h3>
+<div class="paired"><div><pre><code><span class="comment">// TestGame 里造局面的几个助手（签名与关键行，部分）。</span>
+fun addCiv(vararg uniques: String, isPlayer: Boolean = false): Civilization
+fun addCity(civInfo: Civilization, tile: Tile,
+            replacePalace: Boolean = false, initialPopulation: Int = 1): City
+fun addUnit(name: String, civInfo: Civilization, tile: Tile?): MapUnit
+fun createBuilding(vararg uniques: String) =
+    createRulesetObject(ruleset.buildings, *uniques) { Building() }
+        .apply { ruleset = gameInfo.ruleset }</code></pre><p class="source"><a href="../../tests/src/com/unciv/testing/TestGame.kt">本地 TestGame.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/testing/TestGame.kt#L155">addCiv · L155</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/testing/TestGame.kt#L191">addCity · L191</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/testing/TestGame.kt#L213">addUnit · L213</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/testing/TestGame.kt#L275">createBuilding · L275</a></p></div><div><p>这些助手让测试能像搭积木一样摆局面：<code>addCiv</code> 造一个文明（可带 unique、可标成人类玩家），<code>addCity</code> 在指定地块上建城并给初始人口，<code>addUnit</code> 按规则集里的单位名造一个单位放到地块上。</p><p><code>createBuilding</code> 是“现造规则”的关键：它把一个 Building 对象塞进克隆规则集的 <code>buildings</code> 表，于是后面 <code>addBuilding("Monument")</code> 之类的按名查找就能命中。这让你能测任何一条自定义 unique 的效果，而不必修改 <code>android/assets/jsons/</code> 里的正式定义。</p></div></div>
+<aside class="callout"><strong>测试为什么能跑得又快又不碰界面</strong><p>这些测试都标注 <code>@RunWith(BaseTestRunner::class)</code>。BaseTestRunner 的注释说得很直白：它“直接在调用线程上跑”，支持 <code>Gdx.files</code>，但不碰 <code>Gdx.app</code>、<code>Gdx.input</code>、<code>Gdx.graphics</code>——只有需要 GL 上下文或 Gdx 线程的测试才换 <code>GdxTestRunner</code>，后者用 mock 的 GL20 和 HeadlessApplication 模拟一个无头应用。这就是测试既不用打开游戏窗口、又能读真实 JSON 的原因：<strong>逻辑和界面被分开，测试只走逻辑那半边</strong>。<a href="../../tests/src/com/unciv/testing/BaseTestRunner.kt">BaseTestRunner.kt</a>。</p></aside>
+</section>
+
+<section id="loadgame"><h2>4. 读档测试：拿真实历史存档当证据</h2>
+<p>TestGame 造的是“我们想要的最小局面”，读档测试造的却是“玩家曾经真实存档的局面”。这类测试把一个压缩过的存档字符串读回成 GameInfo，验证旧存档到今天还能还原，是向后兼容的回归证据。先看读档的入口函数：</p>
+<div class="paired"><div><pre><code><span class="comment">// core/.../files/UncivFiles.kt 中的读档入口（部分代码）。</span>
+fun gameInfoFromString(gameData: String): GameInfo {
+    <span class="comment">// 去掉换行回车，再尝试解压；解压失败就当作明文</span>
+    val fixedData = gameData.trim().replace("\r", "").replace("\n", "")
+    val unzippedJson = try {
+        FileConversions.unzip(fixedData)
+    } catch (ex: Exception) { fixedData }
+
+    val gameInfo = try {
+        json().fromJson(GameInfo::class.java, unzippedJson)
+    } catch (ex: Exception) {
+        <span class="comment">// 反序列化失败时，读出版本号，报版本不兼容</span>
+        throw IncompatibleGameInfoVersionException(...)
+    } ?: throw UncivShowableException("The file data seems to be corrupted.")
+
+    gameInfo.setTransients() <span class="comment">// 补上运行时引用</span>
+    return gameInfo
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/files/UncivFiles.kt">本地 UncivFiles.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/files/UncivFiles.kt#L429">gameInfoFromString · L429</a></p></div><div><p>读档的流程和第二课的结论完全对上：先反序列化成对象，再 <code>setTransients()</code> 把 <code>@Transient</code> 的引用（<code>civ</code>、<code>centerTile</code>、<code>ruleset</code> 等）按保存的 ID、名字、坐标补回来。存档里没有规则定义，只有规则集名字，所以 <code>setTransients</code> 里会按名字去 <code>RulesetCache</code> 取（第三课的 <code>getComplexRuleset</code>）。</p><p>读档失败分两种：解压/解析出错，或者版本号高于当前兼容版本——后者会抛 <code>IncompatibleGameInfoVersionException</code>。这正是读档测试要守护的边界：别让一个未来版本的存档悄悄读进来，再在别处崩溃。</p></div></div>
+<h3>LoadGameTest：三条真实存档</h3>
+<div class="paired"><div><pre><code><span class="comment">// tests/src/com/unciv/logic/LoadGameTest.kt（部分）。</span>
+@RunWith(BaseTestRunner::class)
+class LoadGameTest {
+    <span class="comment">// 2023-08 香草规则集、观战、4 AI、9 城邦、信息时代开局、推进到第 13 回合</span>
+    private val vanillaGameWithCityStates = "H4sIAAAAAAAA/..." <span class="comment">// 压缩串很长，这里截断</span>
+
+    @Before
+    fun loadRulesets() {
+        RulesetCache.loadRulesets(noMods = true)
+        UncivGame.Current = UncivGame()
+        UncivGame.Current.settings = GameSettings()
+    }
+
+    @Test
+    fun loadVanillaGameFromStringTest() {
+        UncivFiles.gameInfoFromString(vanillaGameWithCityStates)
+    }
+}</code></pre><p class="source"><a href="../../tests/src/com/unciv/logic/LoadGameTest.kt">本地 LoadGameTest.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/LoadGameTest.kt#L17">LoadGameTest · L17</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/LoadGameTest.kt#L37">loadVanillaGameFromStringTest · L37</a></p></div><div><p>类里存了几段真实存档的压缩字符串（<code>H4sI...</code> 是 gzip 的 base64 开头），注释标着每段存档的年代、规则集、玩家构成和推进到的回合。测试方法本身极短：就是把字符串交给 <code>gameInfoFromString</code>——只要不抛异常，就算读档成功。</p><p>这就是“证据”的用法：这些存档不是手写的理想输入，而是历史上某个版本真实生成的文件。每次升级序列化或规则后，只要这些旧档还能读回，就说明没破坏向后兼容。字符串太长被压缩存储，注释里那句“为去掉对向后兼容的依赖而更新”透露了维护方式——更新存档用第 4 节里 <code>@Ignore</code> 的工具测试。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// 三条被 @Ignore 的存档更新工具（部分代码）。</span>
+@Test
+@Ignore("Use only to update the hardcoded value to remove reliance on backward compatibility")
+@RedirectOutput(RedirectPolicy.Show)
+fun updateVanillaGameString() {
+    val oldGame = UncivFiles.gameInfoFromString(vanillaGameWithCityStates)
+    val newGame = oldGame.clone()
+    val data = UncivFiles.gameInfoToString(newGame, forceZip = true, updateChecksum = true)
+    println(data) <span class="comment">// 把打印出的新串粘回上面的 val</span>
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/LoadGameTest.kt#L56">updateVanillaGameString · L56</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/automation/civilization/NextTurnAutomationTest.kt#L1">@Ignore 用法</a></p></div><div><p>带 <code>@Ignore</code> 的测试不会被正常跑（所以本机那次是 3 条“跳过”）。它们是维护用的：想更新某段存档时，临时去掉 <code>@Ignore</code> 跑一次，把控制台打印出的新字符串粘回 <code>val</code>，再把 <code>@Ignore</code> 加回来。这样“测试用的存档数据”和“被测试的读档逻辑”分开维护。</p><p><code>@RedirectOutput(RedirectPolicy.Show)</code> 是 Unciv 自定义的注解，控制这条测试的标准输出直接打印（因为 <code>println(data)</code> 就是要给人看的）。普通测试默认 <code>ShowOnFailure</code>——平时吞掉输出，失败时才吐出来。这也解释了为什么测试跑起来很安静。</p></div></div>
+<aside class="callout"><strong>Godot 对照：先写最小场景，再写断言</strong><p>同样的“用证据读源码”思路可以照搬到 Godot 4 C#：用一个不挂进场景树的纯 C# 类封装规则和状态，测试里构造最小输入、调用方法、断言结果，不依赖 <code>_Ready</code> 或渲染帧。Godot 4 自带 <a href="https://docs.godotengine.org/en/stable/tutorials/scripting/unit_testing.html">GdUnit 或自定义测试</a>，也可以像 Unciv 这样把可复用的“最小对局工厂”抽成一个助手。关键是同一句纪律：<strong>先把“必须是 4”写下来，再去看代码为什么是 4</strong>。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>测试是一等源码：它和主源码同包同目录，注释与类名本身就是“这段代码该怎么用”的说明。</strong></li><li><strong>一条测试 = 输入（given）→ 执行（when）→ 预期（then）；断言失败说明某段生产代码没按预期走。</strong></li><li><strong>关键断点是断言失败时最先怀疑的那一行；读测试要把“预期值”和“产生它的生产代码”对上。</strong></li><li><strong>TestGame 用克隆的规则集 + 单格地图 + 内存里的文明/城市，让你不启动游戏就能摆出任意局面；createBuilding 可以现造规则。</strong></li><li><strong>测试进程的工作目录指向 android/assets，逻辑与界面被 BaseTestRunner 分开，测试只走逻辑那半边。</strong></li><li><strong>读档测试拿真实历史存档当证据，验证旧档能读回、版本边界不被悄悄突破。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；能选一条现有测试、写清输入预期与断点、并本地跑通，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="a"><fieldset><legend>1. TestGame 的规则集为什么可以随意修改？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="TestGame 对 G&K 规则集调用了 clone，改的是副本，缓存里的原对象不受影响。"><span>它克隆了内置规则集的副本</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="如果直接改缓存原对象，其他测试或后续 loadRulesets 会拿到被污染的规则集，所以必须先 clone。"><span>它直接改动缓存中的原对象</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="存档只存规则集名字，不存定义对象；TestGame 也不读存档，而是从缓存取规则集再克隆。"><span>它从存档重建了整份规则集</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="测试用 noMods 加载内置规则集，不下载模组；可改是因为 clone 了副本。"><span>它下载官方模组并重新加载</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="b"><fieldset><legend>2. 单元测试里的断言主要证明什么？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="按钮跳转是界面行为，需要 GdxTestRunner；普通断言验证的是逻辑结果，不碰屏幕。"><span>界面按钮点击后能跳转屏幕</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="断言把给定输入经过执行得到的实际结果，与预期结果比对，不一致就让测试失败。"><span>输入经过执行得到预期结果</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="体积与正确性无关；断言关心的是状态是否按预期变化，不是序列化后的字节数。"><span>游戏存档压缩后的体积更小</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="这是地图生成测试要管的事，不是所有断言都验证坐标去重。"><span>地图生成坐标不会发生重复</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>3. 普通测试为什么不需要启动游戏窗口？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="测试是自动化的，不该要手动输入；断言自己核对结果，不需要玩家参与。"><span>断言需要玩家手动输入命令</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="测试在本地进程内跑，不连接服务器；只有联机功能才需要网络。"><span>每个测试都连接远程服务器</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="BaseTestRunner 直接在调用线程上跑，只依赖游戏逻辑对象；需要 GL 的才换 GdxTestRunner。"><span>断言只依赖游戏逻辑的对象</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="恰恰相反，多数测试刻意不开窗口；只有 GdxTestRunner 才 mock 一个无头应用。"><span>运行器自动打开了桌面窗口</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>4. 读档测试为什么用整段存档字符串？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="压缩是为省文件体积和便于内联，不是为了提速；用真实存档是为验证兼容性。"><span>压缩字符串能加快测试运行</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="存档是历史固定输入，随机内容反而难复现、难当回归证据。"><span>随机生成的内容更容易复现</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="文件读取要处理路径与 IO，内联字符串更省事；关键是用真实存档验证还原。"><span>手工输入比文件读取更可靠</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="历史存档是真实输入，读回不抛异常就证明旧档仍兼容，是向后兼容的回归证据。"><span>用真实存档来验证还原能力</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：它克隆了内置规则集的副本；2：输入经过执行得到预期结果；3：断言只依赖游戏逻辑的对象；4：用真实存档来验证还原能力。分别对应 <a href="#tests-source">测试入口</a>、<a href="#assert">断言三要素</a>、<a href="#testgame">TestGame</a>、<a href="#loadgame">读档测试</a>。</p></details>
+<h3>练习 A · 选一条测试写三要素（5 分钟）</h3><p>打开 <a href="../../tests/src/com/unciv/logic/city/CityTest.kt">CityTest.kt</a>，选“卖建筑”之外任意一条测试，写出它的输入、预期和关键断点，并到生产代码里找到产生预期的那一行。</p><details class="rubric"><summary>展开核对要点</summary><p>以 <code>should move capital when destroyed</code> 为例：输入是两座城，其中一座叫 “Not capital”；执行是 <code>capitalCity.destroyCity(overrideSafeties = true)</code>；预期是毁掉的不是首都、且新首都成了 “Not capital”。关键断点在 <code>City.destroyCity</code> 里 <code>if (isCapital()) civ.moveCapitalToNextLargest(null)</code> 这一行——它保证首都先转移再移除。任何一条测试都能按这个模板拆。</p></details>
+<h3>练习 B · 预测卖价（3 分钟）</h3><p>如果把 <code>getGoldForSellingBuilding</code> 里的 <code>cost / 10</code> 改成 <code>cost / 5</code>，第 2 节那条 <code>should sell building</code> 会发生什么？断言还能过吗？</p><details class="rubric"><summary>展开答案</summary><p>过不了。纪念碑成本不变，卖价变成成本 / 5，测试里预期的 <code>4</code> 就对不上 <code>assertEquals</code>，测试变红。这正是确定值断言的回归保护：算法一变，测试立刻报警。要改算法，就得连同测试里的预期值一起改，并确认新数值符合设计。</p></details>
+<h3>练习 C · 本地跑通核验（10 分钟）</h3><p>在你的本地环境跑一条测试作为“可运行环境核验”：用 <code>:tests:test --tests "com.unciv.logic.city.CityTest"</code>（Gradle），或按 <a href="../../docs/Developers/Building-Locally.md">Building-Locally.md</a> 的说明在 IDE 里跑 “Run unit tests”。记录结果：跑了几题、过几题、有无跳过。</p><details class="rubric"><summary>展开核对要点</summary><p>正常应看到 CityTest 的 14 个方法全过、0 失败（本题不含 @Ignore，所以不应有跳过）。若第一步就报资源或规则集错误，多半是工作目录没指向 android/assets——回看第 1 节的 <code>workingDir</code>。跑通后你就完成了一次“用证据核验理解”：绿条本身不是你写的证据，但它是环境就绪、源码与你手上版本一致的证据。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../tests/src/com/unciv/testing/TestGame.kt">TestGame.kt</a> 的类注释和构造器，再挑一条你关心的测试，比如 <a href="../../tests/src/com/unciv/logic/city/CityTest.kt">CityTest.kt</a>，把它和生产代码对照读一遍。想理解无头运行再看 <a href="../../tests/src/com/unciv/testing/BaseTestRunner.kt">BaseTestRunner.kt</a> 的类注释，最后在 <a href="../../tests/src/com/unciv/logic/LoadGameTest.kt">LoadGameTest.kt</a> 里体会“真实存档当证据”。下一课进入地图专题，会用到 <code>HexmathTests.kt</code>——那时你已经会读测试了。</p><p>下次学习前，用两分钟复述“given / when / then / 关键断点”四要素；约一周后再做练习 B。如果只记得断言写法却说不出它钉住了哪行生产代码，翻一下<a href="reference/architecture.html#testing">测试与证据速查</a>，弄清卡住的地方后合上资料再试一次。</p><p>有不清楚的步骤，可以直接问教学助手。说说你读了哪条测试、现在怎么理解、哪里想不通，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="reference/architecture.html">架构与术语速查</a><a href="0005-hex-coordinates.html">下一课：六边形如何编号（地图专题）</a></div></section>
+<footer>资料核对：2026-09-10。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。</footer>
+</main></div>
+</body>
+</html>

@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>10 · 可玩的出生地与资源 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>10 / 可玩的出生地与资源</strong><a href="#goal">目标、回顾与场景</a><a href="#regions">1. 区域：地图切成平衡的块</a><a href="#starts">2. 出生点评价：好起点长什么样</a><a href="#normalize">3. 修正起点与文明落位</a><a href="#resources">4. 资源摆放：怎样服务玩法</a><a href="#tradeoffs">5. 约束与取舍</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第 07～09 课<br>含源码走读与推演练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第二阶段 / 地图专题 · 生成专题第四课</div>
+<h1>可玩的出生地与资源</h1>
+<p class="lead">第九课结束时，地图上已经有了完整的地形、山链和河流，但它还是一张“风景区”：没有文明、没有起点、没有资源。这一课跟生成流水线的最后一段——<code>MapRegions</code> 先把地图切成若干块肥沃度相近的区域，<code>RegionStartFinder</code> 给每块区域挑一个起点，<code>StartNormalizer</code> 再把不够玩的起点补齐，<code>resourceplacement/</code> 的三个类最后把奢侈品、战略资源和奖励资源撒上去。读完你应当能解释：这些步骤服务的是开局公平与玩家的选择空间，而不是地图好不好看。</p>
+<p class="meta">需要的基础：第七课的生成分支与 <code>isMapEditor</code> 判定，第八课的 Fertility 与温湿分布，第六、九课的地块分层与河流字段。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>三个场景都来自新开一局的体验。场景一：同样的地图类型和大小，四家文明不会挤在同一片大陆，而是各占一块——这是第 1 节 <code>MapRegions</code> 按肥沃度分配与切分的结果。场景二：有的起点周围明显平坦，游戏却给它塞了几格丘陵、一两个绿洲或一份小麦——这是第 3 节 <code>StartNormalizer</code> 在做“保底”。场景三：同一张图上，有的文明周围是香料，有的是丝绸，城市扩张时总能发现新物产——这是第 4 节奢侈品“每个区域一种”的分配目标。无论哪种，判断标准都不是画面，而是这局游戏能不能正常开。</p>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>区域：</strong>地图怎样切成大小不一的几块？区域类型（草原/平原/丘陵）从哪来？</li><li><strong>起点：</strong>好起点靠什么打分？判定失败时逐级放宽的顺序是什么？</li><li><strong>资源：</strong>奢侈品、战略资源、奖励资源各自的目标是什么？“impact” 在防什么？</li></ul><p>读完还要会一件事：不看正文，对“这局为什么把某家文明放在这里、那块地为什么多出一份资源”说出证据在源码的哪一段。</p></div><div><h3>口述回顾：第六～九课</h3><ol><li>第六课：A 查它与右上方 B 之间的河、B 查与 A 之间的河，读的是哪个字段？（提示：边的归属格）</li><li>第七课：<code>generateMap</code> 的阶段链里，区域与资源在哪一步？编辑器分支用什么兜底？</li><li>第八课：温度公式里纬度项与噪声项各占多少权重？噪声连续性靠哪一步保证？</li><li>第九课：Map Elevation 滑块拉高时，幂指数与山数量怎么变？河流三布尔覆盖哪三条边？</li></ol><p>前四条是这一课的直接地基；答不上来的先回对应课扫一眼，再往下读。</p><p class="source"><a href="0006-tilemap.html">第六课：地块怎样组成地图</a><a href="0007-map-generation.html">第七课：地图生成流水线</a><a href="0008-landmass-climate.html">第八课：陆海与气候分布</a><a href="0009-elevation-rivers.html">第九课：山地与河流</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>区域切分与类型</td><td>12 分钟</td><td>肥沃度加权、递归二分、区域类型优先级</td></tr><tr><td>出生点评价</td><td>15 分钟</td><td>三环阈值、分环计分、closeStartPenalty</td></tr><tr><td>起点修正与文明落位</td><td>10 分钟</td><td>粮食/生产力保底与 startBias 分桶</td></tr><tr><td>资源摆放</td><td>15 分钟</td><td>三类资源的目标、impact 抑制与保底</td></tr></tbody></table>
+</section>
+
+<section id="regions"><h2>1. 区域：地图切成平衡的块</h2>
+<p>第七课的阶段链走到 <code>assignContinents</code> 之后是 <code>RiverGenerator</code>，再往下 MapGenerator 分了两条路：新游戏才做区域与资源，地图编辑器只做自然奇观加一个简单的 <code>spreadResources</code> 兜底（MapGenerator L204 <code>isMapEditor</code> 分支）。区域这块的工作全部在 <code>mapregions/MapRegions.kt</code>。入口按“地图什么样”分成两条路：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegions.generateRegions（部分代码）。问：N 个文明怎么瓜分一张图？</span>
+fun generateRegions(tileMap: TileMap, numRegions: Int) {
+    if (numRegions <= 0) return                              <span class="comment">// ① 编辑器：不做区域</span>
+    if (tileMap.continentSizes.isEmpty())
+        throw Exception("No Continents on this map!")        <span class="comment">// ① 数据没算好就直接报错</span>
+
+    <span class="comment">// ② 一个覆盖全图的大矩形，按形状取半径</span>
+    val radius = if (tileMap.mapParameters.shape == MapShape.hexagonal
+            || tileMap.mapParameters.shape == MapShape.flatEarth)
+        tileMap.mapParameters.mapSize.radius.toFloat()
+    else
+        max(tileMap.mapParameters.mapSize.width / 2,
+            tileMap.mapParameters.mapSize.height / 2).toFloat()
+    val mapRect = Rectangle(-radius, -radius, radius * 2 + 1, radius * 2 + 1)
+
+    <span class="comment">// ③ 碎岛图：无视大陆，整图切矩形</span>
+    if (tileMap.usingArchipelagoRegions()) {
+        val hugeRect = Region(tileMap, mapRect, -1)  <span class="comment">// -1 = 忽略大陆数据</span>
+        hugeRect.affectedByWorldWrap = false         <span class="comment">// 起点就放在接缝处</span>
+        hugeRect.updateTiles()
+        divideRegion(hugeRect, numRegions)
+        return
+    }
+    <span class="comment">// ④ 大陆模式见下一段</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">本地 MapRegions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L95">generateRegions · L95</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L571">usingArchipelagoRegions · TileMap L571</a></p></div><div><p>这段在回答“N 个文明怎么瓜分一张图”。先看有没有值得按大陆分的主体：碎岛没有，整图直接切；有大陆，走“统计 → 分配 → 切块”三步。下面只展开大陆分支。</p><p>① <code>numRegions</code> 由调用方算好并传进来，就是“有几个大文明”（MapGenerator L211 <code>civilizations.count { isMajorCiv }</code>）。为 0 说明在编辑器里生成，直接返回；<code>continentSizes</code> 是 <code>assignContinents</code> 步骤算好的，没有说明前一步没跑。</p><p>② 矩形图与六边形/平面图的半径算法不同，这里不能混用。<code>Region</code> 内部一切“属于我吗”的判断都靠这个矩形和大陆 ID，所以矩形先是全图，之后会被逐层缩小。</p><p>③ 碎岛图（<code>usingArchipelagoRegions</code> 的定义是“最大大陆占全部陆地不到 25%”）没有值得按大陆分的主体，干脆把整图当一个区域切；<code>continentID = -1</code> 表示“不要按大陆过滤地块”，<code>affectedByWorldWrap = false</code> 表示“从接缝处开始量，别绕圈”。</p><p>④ 大陆模式的思路完全不同，它先统计每块大陆有多少 Fertility，再决定每块大陆放几个文明，最后逐块切分。</p></div></div>
+<p>大陆模式分三步：统计肥沃度、按肥沃度分配文明、把每块大陆切成矩形。</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegions.generateRegions 的大陆分支（部分代码）。问：文明怎么分到大陆？</span>
+val continents = tileMap.continentSizes.keys.toMutableList()
+val civsAddedToContinent = HashMap&lt;Int, Int&gt;()   <span class="comment">// 大陆 ID → 已分到几个文明</span>
+val continentFertility = HashMap&lt;Int, Int&gt;()     <span class="comment">// 大陆 ID → 肥沃度总和</span>
+val continentToColumnsItsIn = HashMap&lt;Int, HashSet&lt;Int&gt;&gt;()  <span class="comment">// 记列号，用来判断环绕</span>
+
+for (tile in tileMap.values) {                    <span class="comment">// ① 一趟统计</span>
+    val continent = tile.getContinent()
+    if (continent != -1) {
+        continentFertility[continent] = tile.getTileFertility(true)
+            + (continentFertility[continent] ?: 0)
+        continentToColumnsItsIn[continent]!!.add(tile.getColumn())
+    }
+}
+
+repeat(numRegions) {                              <span class="comment">// ② 每分一个文明，重新挑最值的大陆</span>
+    val bestContinent = continents.maxByOrNull {
+        continentFertility[it]!! / (1 + (civsAddedToContinent[it] ?: 0))
+    }!!
+    civsAddedToContinent[bestContinent] = (civsAddedToContinent[bestContinent] ?: 0) + 1
+}
+
+for (continent in civsAddedToContinent.keys) {    <span class="comment">// ③ 用列号把大陆包成矩形</span>
+    val continentRegion = Region(tileMap, Rectangle(mapRect), continent)
+    val cols = continentToColumnsItsIn[continent]!!
+    continentRegion.rect.x = cols.filter { !cols.contains(it - 1) }.maxOf { it }.toFloat()
+    continentRegion.rect.width = cols.size.toFloat()
+    if (tileMap.mapParameters.worldWrap &amp;&amp; cols.minOf { it } &lt; continentRegion.rect.x)
+        continentRegion.affectedByWorldWrap = true
+    continentRegion.updateTiles()
+    divideRegion(continentRegion, civsAddedToContinent[continent]!!)
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">本地 MapRegions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L116">大陆分支 · L116</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L484">getTileFertility · L484</a></p></div><div><p>① 每个地块的 Fertility 来自规则集：<code>getTileFertility</code> 先读地形（含特征）上 “Fertility for Map Generation” 一类 unique 的加总，再给临河 +1、临淡水 +1、<code>checkCoasts = true</code> 时临海 +2。临河与临淡水会同时命中，所以一条河正好 +2——源码注释特意点明这一点。同一趟顺带记录大陆出现在哪些列号上，用于第 ③ 步判断它是不是跨了地图接缝。</p><p>② 分配不是一次算好，而是 <code>repeat(numRegions)</code> 每轮重新比一次，候选值 = <code>fertility / (1 + 该大陆已分到的文明数)</code>。已分到 0 个时，候选值就是这块大陆的原肥沃度；某大陆分到过 1 个文明后，下一轮它参与比较的值变成 <code>fertility / 2</code>，再被分到一次则是 <code>fertility / 3</code>——分母按 1、2、3 递增，不是每次再砍一半。代入三块大陆 A=100、B=55、C=40：第一轮 100 / 55 / 40 选 A（A 计数 1）；第二轮 A 的值变成 100/2 = 50，输给 B=55，于是选 B；第三轮 A=50 大于 C=40 与 B=55/2=27.5，又选 A（A 计数 2）；第四轮 A=100/3≈33.3，最后归 C。所以“最肥的大陆连任”只在它仍比别人的当前值更高时发生：以 A 已被选一次为例，要压过还没被选的 B 需要 <code>F_A/2 &gt; F_B</code>，即 <strong>F_A 超过两倍 F_B</strong>。这也解释了为什么“肥沃的大陆会分到更多文明，但不是全给它”。</p><p>③ 把大陆包成矩形时，先看列号集合里“哪几列是一段连续列的开头”——列号 c 入选的条件是 c−1 不属于本大陆；再取这些开头的<strong>列号最大者</strong>作为矩形左边界 <code>rect.x</code>，宽度取列号总数。它取的<strong>不是大陆的最大列号</strong>，所以不环绕时筛完只剩最左列，结果就是读者预期的那个左边界。代入两个例子：不环绕的大陆列号是 {−2,−1,0,1}，四列里只有 −2 的左边（−3）不在大陆中，筛完只剩 −2，于是 <code>rect.x = −2</code>、宽度 4，正好覆盖 {−2,−1,0,1}；最小列号等于 rect.x，不标记环绕。跨接缝的大陆换个更宽的例子：地图宽 10（列号 −5…4，环绕时相差 10 等价，5 ≡ −5），大陆占左边 3 列与右边 2 列，列号是 {−5,−4,−3,3,4}——它仍是一块连通的陆地，因为最右列 4 的右邻 5 折回来就是 −5。filter 找出的开头是 −5（−6 不在集合里）与 3（2 不在集合里），maxOf 取 3，于是 <code>rect.x = 3</code>、宽度 5，矩形向右铺 {3,4,5,6,7}：3、4 在地图内，5、6、7 越界，由 <code>getTilesInRectangle</code> 逐列换算坐标、再经 <code>getIfTileExistsOrNull</code> 的环绕补偿折回 −5、−4、−3（第六课讲过的补偿），五列正好覆盖整个大陆。这里取“最大开头”是必须的：若取 −5，矩形只能铺 −5…−1，落在接缝另一侧的 3、4 就被漏掉。此时最小列号 −5 小于 rect.x = 3，于是标记 <code>affectedByWorldWrap</code>。<code>updateTiles</code> 在环绕时用同一规则重算 rect.x，并把宽度改成“实际有地块的列数”；不环绕时宽度保持 maxColumn − minColumn + 1 并清掉标记。它同时只保留属于本大陆、落在矩形内的格子，把 <code>getTileFertility(continentID != -1)</code> 累加成 <code>totalFertility</code>。</p></div></div>
+<p>切分是递归的：每次把一块区域按肥沃度分成两份，份数不够就继续分，直到份数用完。</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegions.divideRegion 与 splitRegion（部分代码）。问：一块地怎么切成两份才公平？</span>
+private fun divideRegion(region: Region, numDivisions: Int) {
+    if (numDivisions &lt;= 1) { regions.add(region); return }   <span class="comment">// ① 终止：收下这块</span>
+
+    val firstDivisions = numDivisions / 2                    <span class="comment">// ② 整数除法向下取整</span>
+    val splitRegions = splitRegion(region, (100 * firstDivisions) / numDivisions)
+    divideRegion(splitRegions.first, firstDivisions)         <span class="comment">// ⑦ 两块各自再分</span>
+    divideRegion(splitRegions.second, numDivisions - firstDivisions)
+}
+
+private fun splitRegion(regionToSplit: Region, firstPercent: Int): Pair&lt;Region, Region&gt; {
+    val targetFertility = (regionToSplit.totalFertility * firstPercent) / 100   <span class="comment">// ③ 目标肥沃度</span>
+    val widerThanTall = regionToSplit.rect.width &gt; regionToSplit.rect.height    <span class="comment">// ④ 沿长边切</span>
+    var bestSplitPoint = 1
+    var closestFertility = 0
+    var cumulativeFertility = 0
+    val highestPointToTry = if (widerThanTall) regionToSplit.rect.width.toInt()
+        else regionToSplit.rect.height.toInt()
+    for (splitPoint in 1..highestPointToTry) {
+        val nextRect = if (widerThanTall)   <span class="comment">// ⑤ 窄带：1 列宽 × 整块高</span>
+            splitOffRegion.tileMap.getTilesInRectangle(Rectangle(
+                splitOffRegion.rect.x + splitPoint - 1, splitOffRegion.rect.y,
+                1f, splitOffRegion.rect.height))
+        else splitOffRegion.tileMap.getTilesInRectangle(Rectangle(   <span class="comment">// ⑤ 窄带：整块宽 × 1 行高</span>
+            splitOffRegion.rect.x, splitOffRegion.rect.y + splitPoint - 1,
+            splitOffRegion.rect.width, 1f))
+        cumulativeFertility += if (splitOffRegion.continentID == -1)   <span class="comment">// ⑥ 只计本大陆格</span>
+            nextRect.sumOf { it.getTileFertility(false) }
+        else nextRect.sumOf {
+            if (it.getContinent() == splitOffRegion.continentID) it.getTileFertility(true) else 0 }
+        <span class="comment">// 取离目标最近的位置；肥沃度相同则取更靠近中点的位置</span>
+        ...
+    }
+    <span class="comment">// 按 bestSplitPoint 改两块矩形的 x/width 或 y/height（切下的一块含切点），再 updateTiles()</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">本地 MapRegions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L162">divideRegion · L162</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L176">splitRegion · L176</a></p></div><div><p>切分的脑内模型是<strong>分蛋糕</strong>：要 4 份就先对半切一刀（二分），再把两半各自递归切到份数用完；每刀切在哪里由“肥沃度对齐”决定，而不是面积对齐。</p><p>① 递归的终止条件不是“分得够小”，而是“份数分完”。所以最终区域数<strong>恒等于</strong>调用方传进来的 <code>numRegions</code>——4 家大文明就正好 4 块区域，多一块少一块都不会出现。</p><p>② 先算前半部分的份数与百分比：4 分成 2+2（各 50%），3 分成 1+2（33%+67%）。整数除法向下取整，奇偶数都能处理。</p><p>③ 目标不是“面积相等”，而是“肥沃度按比例相等”：目标值 = <code>totalFertility × firstPercent / 100</code>。</p><p>④ 每刀沿<strong>当前这块</strong>的长边切（宽大于高切竖刀，否则切横刀），刀口只能是直线、位置只能逐格挪——这是矩形切分法的根源限制。方向每刀重选：极端细高的区域层层横切，出来是上下堆叠的横条；极端矮胖则是并排竖条；长宽接近的区域一刀之后往往换向，4 份大致呈 2×2 的田字格。代入 13×20 的区域：先横切成两块 13×10，每块宽 13 已大于高 10，于是改为竖切成 6 列与 7 列。切完框内仍只有本大陆的格子属于区域，所以区域的真身是“框内的大陆部分”，边缘常有海洋掏出的洞；刀口按肥沃度对齐目标，肥处切得窄、贫处切得宽，四块大小并不均等。</p><p>⑤ 试刀的方式是<strong>窄带累加</strong>：以高 ≥ 宽、切横刀为例，第 k 轮取的是 <code>Rectangle(rect.x, rect.y + k − 1, rect.width, 1f)</code>——一条“整块宽 × 1 行高”的横带，y 从区域底边起每轮 +1；宽大于高时对称地取“1 列宽 × 整块高”的竖带，x 每轮 +1。跟踪调试时看到的 [−6,−7,13,1] → [−6,−6,13,1] → [−6,−5,13,1] 读法是：x=−6、宽 13 不变（整块区域的），y 从 −7 起每轮 +1、高固定 1——即同一块区域（底边 y=−7、宽 13）最底下的第 1、2、3 行。窄带只用来<strong>累加</strong>，不动任何矩形；循环全部走完才按 <code>bestSplitPoint</code> 一次性切割：切下的一块取底部（或左侧）<code>bestSplitPoint</code> 行（列），剩下的一块 y（或 x）上移、高度（宽度）减去该数，随后两块各自 <code>updateTiles()</code>。</p><p>⑥ 窄带里<strong>只把属于本大陆的格子计入 Fertility</strong>，其他格子（海洋或别的大陆）加 0，但仍占着位置；碎岛模式（<code>continentID == -1</code>）不做大陆过滤，带里所有格子直接计入。</p><p>⑦ 切完两块各自递归，直到份数用完。区域内部用 <code>updateTiles</code> 重算地块与 <code>totalFertility</code>——这也是前面所有矩形操作最终“生效”的地方。</p></div></div>
+<aside class="callout"><strong>延伸：区域为什么“方方正正”，有没有更自然的方案</strong><p>区域只是生成期的中间数据：它决定起点、城邦与资源往哪儿放，画完地图就丢弃，游戏里<strong>没有任何国界线式的可视化</strong>，玩家看到的“区域”只有间接效果（比如两个文明的奢侈品种类明显不同）。所以切分方正一点，玩家根本感知不到，也就不值得为“好看”多花成本。真想要更自然的边界，经典做法是 Voronoi：给 n 个种子点，每个格子划给最近的种子，边界天然曲折；再按“交换边界格后肥沃度更均衡”迭代几轮（类似 k-means），公平性也不丢。这和背包问题<strong>不像</strong>：背包问题是在“选哪些物品”的组合空间里找最优（NP 难），而这里每刀的候选位置只有十几个，直接枚举取最接近目标的一刀，是 O(宽+高) 的贪心逐刀，不涉及组合爆炸。想两者兼得（自然边界 + 肥沃度均衡），Voronoi + 均衡迭代正是教科书写法，代价是代码量与调试成本翻几倍——Unciv 选矩形二分，是“公平优先、观感无所谓”的典型取舍。</p></aside>
+<p>区域切好后，每个区域还要定一个“类型”，供资源与起点规则按区域筛选（比如“丘陵区域多出铁”）。类型来自规则集里地形挂的 region unique：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegions.assignRegionTypes（完整）。问：每块区域是什么“风土”？</span>
+private fun assignRegionTypes() {
+    val regionTypes = ruleset.terrains.values
+        .filter { getRegionPriority(it) != null }
+        .sortedBy { getRegionPriority(it) }        <span class="comment">// ① 优先级升序</span>
+
+    for (region in regions) {
+        region.countTerrains()                     <span class="comment">// ② 统计地形与 Coastal</span>
+        for (type in regionTypes) {
+            <span class="comment">// ③ 先判排除条件</span>
+            if (type.getMatchingUniques(UniqueType.RegionRequireFirstLessThanSecond)
+                    .any { region.getTerrainAmount(it.params[0])
+                        &gt;= region.getTerrainAmount(it.params[1]) })
+                continue
+            <span class="comment">// ④ 再判入选条件，命中即定型</span>
+            if (type.getMatchingUniques(UniqueType.RegionRequirePercentSingleType)
+                    .any { region.getTerrainAmount(it.params[1])
+                        &gt;= (it.params[0].toInt() * region.tiles.size) / 100 }
+                || type.getMatchingUniques(UniqueType.RegionRequirePercentTwoTypes)
+                    .any { region.getTerrainAmount(it.params[1])
+                        + region.getTerrainAmount(it.params[2])
+                        &gt;= (it.params[0].toInt() * region.tiles.size) / 100 }) {
+                region.type = type.name
+                break
+            }
+        }
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">本地 MapRegions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L392">assignRegionTypes · L392</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/Region.kt#L70">countTerrains · Region L70</a></p></div><div><p>切出来的块还只是“第 3 号矩形”，没有名字。这一段给每块地定<strong>风土类型</strong>（冻土/丛林/…），规则全部来自规则集，代码本身不认识任何具体地形。</p><p>① 只要地形挂了两种 region unique 之一就参与评选，<code>getRegionPriority</code> 取占位符里的“priority”数字；升序排列意味着<strong>数字小的先被检查</strong>，先命中就先定型。区域没有逐条硬编码类型名，模组加地形时只要带 unique 就能进入这张表。</p><p>② <code>countTerrains</code> 统计区域里每种地形/特征出现多少次，另外单独记 “Coastal”（临海的区域地块数）。带 “Base Terrain on this tile is not counted for Region determination” 的地块只数特征不数基础地形——丘陵就靠这条把底下的草原排除掉，让“丘陵区域”名副其实。</p><p>③ 排除条件先判：原版草原与平原互挂 “不能比对方多”，所以一块既多草原又多平原的区域不会被误判成其中一种。</p><p>④ 入选条件是“某地形（或两种地形之和）占比达到百分比”。两条条件任一满足就定 <code>region.type</code> 并 break，所以一个区域只会有一个类型。</p></div></div>
+<p>原版规则集里的优先级（Kotlin REPL 实测 <code>getRegionPriority</code>，数字越小越先判）：</p>
+<table><thead><tr><th scope="col">区域类型</th><th scope="col">类型名</th><th scope="col">priority</th><th scope="col">入选条件（Terrains.json）</th></tr></thead><tbody>
+<tr><td>冻土</td><td>Tundra</td><td>1</td><td>至少 30% 的 Tundra 与 Snow 之和</td></tr>
+<tr><td>丛林</td><td>Jungle</td><td>2</td><td>至少 30% 的 Jungle，或 35% 的 Jungle 与 Forest 之和</td></tr>
+<tr><td>森林</td><td>Forest</td><td>3</td><td>至少 30% 的 Forest，或 35% 的 Forest 与 Jungle 之和</td></tr>
+<tr><td>荒漠</td><td>Desert</td><td>4</td><td>至少 25% 的 Desert</td></tr>
+<tr><td>丘陵</td><td>Hill</td><td>5</td><td>至少 40% 的 Hill</td></tr>
+<tr><td>平原</td><td>Plains</td><td>6</td><td>至少 30% 的 Plains</td></tr>
+<tr><td>草原</td><td>Grassland</td><td>7</td><td>至少 30% 的 Grassland</td></tr>
+</tbody></table>
+<p>一条条件都没命中的区域保持默认值 <code>"Hybrid"</code>（Region.kt L16 初始化就是它），文末第 4 节会看到 <code>Hybrid</code> 在给区域挑“本区特产奖励资源”时怎么当兜底。REPL 实测一张 Small 六边图（4 家大文明）切成 4 块，地块数 146 / 84 / 128 / 128，类型依次是 Hybrid / Plains / Hybrid / Grassland——区域数是精确的 4，大小则明显不等，因为目标按肥沃度而不是面积来定。</p>
+</section>
+
+<section id="starts"><h2>2. 出生点评价：好起点长什么样</h2>
+<p>区域定好型后，<code>assignRegions</code> 先给每个地块建一份生成期数据，再让每块区域挑起点，最后统一做“起点修正”。顺序很关键：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegions.assignRegions 开头（部分代码）。问：挑起点前要准备什么？</span>
+fun assignRegions(tileMap: TileMap, civilizations: List&lt;Civilization&gt;,
+        gameParameters: GameParameters) {
+    if (civilizations.isEmpty()) return
+    assignRegionTypes()                                <span class="comment">// ① 先给区域定型</span>
+
+    tileData = TileDataMap(tileMap.values.size)        <span class="comment">// ② 每格一份生成期数据</span>
+    for (tile in tileMap.values)
+        tileData[tile] = MapGenTileData(
+            tile, regions.firstOrNull { it.tiles.contains(tile) }, ruleset)
+
+    val sortedRegions = regions.sortedBy { it.totalFertility }   <span class="comment">// ③ 肥沃度升序</span>
+    for (region in sortedRegions) RegionStartFinder.findStart(region, tileData)
+    for (region in regions)                                    <span class="comment">// ④ 统一修正</span>
+        StartNormalizer.normalizeStart(tileMap[region.startPosition!!],
+            tileMap, tileData, ruleset, isMinorCiv = false)
+    <span class="comment">// 之后按 startBias 把文明分桶、落到区域（第 3 节）</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">本地 MapRegions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L236">assignRegions · L236</a></p></div><div><p>这一段是挑起点的准备动作，脑内模型是<strong>排考场</strong>：先定好每块“考区”的类型，再给每格发答题卡（生成期数据），最后按“成绩差的先挑座位”的顺序逐区找起点。</p><p>① 区域类型要在挑起点之前定好，因为起点的质量判定会带 <code>GameContext(region = region)</code>——同一种地形在不同类型区域里算不算“粮”可能不同（例如沙漠区域里的绿洲）。</p><p>② <code>TileDataMap</code> 按地块的 <code>zeroBasedIndex</code>（第五课的连续编号）索引，每格一份 <code>MapGenTileData</code>：这格是不是粮、是不是锤（“锤”是玩家社区对<strong>生产</strong>的俗称，源自城市产量的锤子图标；对应源码里的 <code>Prod</code>）、好不好、是不是垃圾、离海几格，以及后面会用到的 <code>closeStartPenalty</code> 和 <code>startScore</code>。<strong>它只活在生成期</strong>，等资源也放完就随 MapRegions 一起丢掉。</p><p>③ 排序是<strong>升序</strong>：肥沃度最低的区域第一个挑。更肥的区域反而后挑，因为它们选择余地大；先挑的区域会在周围打上“封印”（下一段），后来的区域会绕开，于是差区域不至于连唯一像样的角落都被抢走。</p><p>④ 所有起点挑完后才统一做修正——不是挑一个修一个。这样每次修正看到的是全套起点布局，粮食保底不会一边加一边影响别人的判断。</p></div></div>
+<p><code>RegionStartFinder</code> 的搜索顺序是“从区域中心向外一圈圈放宽”：先只看中间 33% 的矩形，不行再扩大到 67% 的“中环”，还不行才去外环，最后才用兜底候选。</p>
+<div class="paired"><div><pre><code><span class="comment">// RegionStartFinder.findStart（完整）。问：从哪一圈开始找？</span>
+internal fun findStart(region: Region, tileData: TileDataMap) {
+    val fallbackTiles = HashSet&lt;Tile&gt;()
+    val centerTiles = region.tileMap
+        .getTilesInRectangle(getCentralRectangle(region.rect, 0.33f)).toSet()
+    if (findGoodPosition(centerTiles, region, tileData, fallbackTiles)) return   <span class="comment">// ① 中心</span>
+
+    val middleDonut = region.tileMap
+        .getTilesInRectangle(getCentralRectangle(region.rect, 0.67f))
+        .filterNot { it in centerTiles }.toSet()
+    if (findGoodPosition(middleDonut, region, tileData, fallbackTiles)) return  <span class="comment">// ② 中环</span>
+
+    val outerDonut = region.tileMap.getTilesInRectangle(region.rect)
+        .filterNot { it in centerTiles || it in middleDonut }
+    if (findEdgePosition(outerDonut, region, tileData, fallbackTiles)) return   <span class="comment">// ③ 外环</span>
+
+    findFallbackPosition(fallbackTiles, tileData, region)                       <span class="comment">// ④ 兜底</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt">本地 RegionStartFinder.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt#L25">findStart · L25</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt#L138">getCentralRectangle · L138</a></p></div><div><p>找起点的顺序是“由内向外放圈”：先只考中心 1/3，没人合格再放宽到中间 2/3 的环带，还不行才用整块区域的边缘。每圈内部怎么挑，看下面两个函数。</p><p>① 起点优先靠近区域中心，这样文明扩张时有四周的空间；<code>getCentralRectangle(rect, 0.33f)</code> 取原矩形宽高各 33% 并居中（数值四舍五入），得到中心小块。</p><p>② 中心没有好点，就把候选扩到 67% 的矩形再减去刚才的中心，形成一圈“中环”。同样要求“好起点”，但中心位置已经放宽了。</p><p>③ 外环是剩下的所有格子。到这里只要求“合格”，不再苛求淡水与海岸——用 <code>findEdgePosition</code>，规则更松（见下）。</p><p>④ 三层都没找到，就把之前存的候选里分数最高的拿来用；<code>fallbackTiles</code> 一层层往里塞“本层最高分但不合格”的格子，等于“矮子里拔将军”。如果连候选都是空的，<code>findFallbackPosition</code> 会直接在某处造一块陆地，保证游戏能开——这属于“宁可难看也不能崩”。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// RegionStartFinder.findGoodPosition（完整）。问：一圈候选里先看谁？</span>
+for (tile in centerTiles) {
+    if (tileData[tile]!!.isTwoFromCoast) continue            <span class="comment">// ① 离海两格直接淘汰</span>
+    if (region.continentID != -1 &amp;&amp; region.continentID != tile.getContinent())
+        continue                                             <span class="comment">// ② 不是本大陆</span>
+    if (tile.isLand &amp;&amp; !tile.isImpassible()) {               <span class="comment">// ③ 只要陆地、可通行</span>
+        evaluateTileForStart(tile, tileData)                 <span class="comment">// 算分</span>
+        if (tile.isAdjacentToRiver()) riverTiles.add(tile)
+        else if (tile.isAdjacentToCoast()
+            || tile.isAdjacentTo(Constants.freshWater)) wetTiles.add(tile)
+        else dryTiles.add(tile)
+    }
+}
+<span class="comment">// ④ 按“临河 → 湿润 → 干燥”的优先级找好点</span>
+for (list in sequenceOf(riverTiles, wetTiles, dryTiles)) {
+    if (list.any { tileData[it]!!.isGoodStart }) {
+        setRegionStart(region, list.filter { tileData[it]!!.isGoodStart }
+            .maxByOrNull { tileData[it]!!.startScore }!!.position, tileData)
+        return true
+    }
+    if (list.isNotEmpty())                                   <span class="comment">// ⑤ 存下本组最高分备用</span>
+        fallbackTiles.add(list.maxByOrNull { tileData[it]!!.startScore }!!)
+}
+return false</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt">本地 RegionStartFinder.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt#L45">findGoodPosition · L45</a></p></div><div><p>圈定了候选范围后，这一段把候选格分成三组：临河的、湿润的（临海或临淡水）、干的。脑内模型是<strong>相亲排序</strong>：先在最好的组里找，好组里没有才看下一组。</p><p>① <code>isTwoFromCoast</code> 的意思是“自己不临海、但旁边一格临海”（MapGenTileData 里定义）。这种格子既吃不到港口，腹地又只剩两个方向，被起点评价直接排除。</p><p>② 大陆模式的区域只认自己的大陆；碎岛模式（<code>continentID == -1</code>）不做这层过滤。</p><p>③ 起点必须是陆地且能通行——水面和山脉不能建城，也就谈不上起点。注意这里只筛选不打断，仍会对每格调用 <code>evaluateTileForStart</code> 写分。</p><p>④ 三组按“临河 > 临海/临淡水 > 普通内陆”的顺序检查。只要某组里出现一个 <code>isGoodStart</code> 的格子，就取<strong>该组内分数最高</strong>的那个作为起点。原版过河有产能与防御的好处，淡水又关系人口增长，所以把两类都放进前两组。</p><p>⑤ 某组一个合格的都没有，就把这组最高分的格子存进兜底集合。三组都试完仍失败，就交给 <code>findFallbackPosition</code>，用兜底集合里全局最高分的那个——它可能连 <code>isGoodStart</code> 都没通过。</p></div></div>
+<p>“好”与“坏”都由 <code>evaluateTileForStart</code> 算出来。它围绕候选格看三圈，累计粮、锤、优质、垃圾格数，先过三张下限表（硬门槛），再按分数表换算成 <code>startScore</code>：</p>
+<div class="paired"><div><pre><code><span class="comment">// RegionStartFinder.evaluateTileForStart（部分代码）。问：这块地几分？</span>
+if (tile.isAdjacentToCoast()) totalScore += 40         <span class="comment">// ① 临海直接加分</span>
+for (ring in 1..3) {                                    <span class="comment">// ② 逐环累加</span>
+    for (outerTile in tile.getTilesAtDistance(ring)) {
+        val outerTileData = tileData[outerTile]!!
+        if (outerTileData.isJunk) totalJunk++
+        else {
+            if (outerTileData.isFood) totalFood++
+            if (outerTileData.isProd) totalProd++
+            if (outerTileData.isGood) totalGood++
+            if (outerTile.isAdjacentToRiver()) totalRivers++
+        }
+    }
+    if (totalFood &lt; minimumFoodForRing[ring]!!
+        || totalProd &lt; minimumProdForRing[ring]!!
+        || totalGood &lt; minimumGoodForRing[ring]!!)
+        localData.isGoodStart = false                  <span class="comment">// ③ 低于下限就否决</span>
+
+    when (ring) {                                      <span class="comment">// ④ 分环计分</span>
+        1 -&gt; totalScore += firstRingFoodScores[totalFood]
+                + firstRingProdScores[totalProd]
+                + totalRivers + (totalGood * 2) - (totalJunk * 3)
+        2 -&gt; { <span class="comment">// 粮食封顶 + 生产力折算，见下</span>
+            val foodScore = if (totalFood &gt; 10) secondRingFoodScores.last()
+                else secondRingFoodScores[totalFood]
+            val effectiveTotalProd = if (totalProd &gt;= totalFood * 2) totalProd
+                else (totalFood + 1) / 2
+            val prodScore = if (effectiveTotalProd &gt; 5) secondRingProdScores.last()
+                else secondRingProdScores[effectiveTotalProd]
+            totalScore += foodScore + prodScore + totalRivers
+                + (totalGood * 2) - (totalJunk * 3)
+        }
+        else -&gt; totalScore += totalFood + totalProd + totalGood
+                + totalRivers - (totalJunk * 2)
+    }
+}
+if (totalJunk &gt; maximumJunk) localData.isGoodStart = false           <span class="comment">// ⑤ 垃圾太多否决</span>
+if (localData.closeStartPenalty &gt; 0) {                              <span class="comment">// ⑥ 被别的起点圈进去了</span>
+    localData.isGoodStart = false
+    totalScore -= (totalScore * localData.closeStartPenalty) / 100
+}
+localData.startScore = totalScore</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt">本地 RegionStartFinder.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt#L158">evaluateTileForStart · L158</a></p></div><div><p>“好”与“不好”的判据全在这里。脑内模型是<strong>给地段打分</strong>：周围三圈是配套（粮、锤、优质、垃圾），临海是学区房（一次 +40）；三张下限表是“硬门槛”，过了门槛才谈分数高低。</p><p>① 自己临海 +40，是整段里最大的一次性加分。临海意味着早期能造港口、海上资源可用，所以起点评价把它放在首位。</p><p>② 三圈的产量是<strong>累计</strong>的：第 2 圈循环结束时，<code>totalFood</code> 里已经含第 1 圈的数。判断“够不够”也要按累计理解，这也符合城市第 1、2、3 环依次纳入工作的顺序。</p><p>③ 三个下限都以 unique 形式写死在 <code>MapRegions</code> 常量里（下表）。任何一环低于下限就把 <code>isGoodStart</code> 置假，但循环<strong>不 break</strong>——后面还要继续算分，好当兜底候选。</p><p>④ 分数表按“第几环、多少个”查（下表）。第 1 环权重最高：“优质格 ×2、垃圾格 ×3”直接影响这一圈的地块价值。第 2 环多一层折算：产量再高也要有粮食养人，所以当 <code>totalProd &lt; totalFood × 2</code> 时，只有 <code>(totalFood + 1) / 2</code> 点生产能计入（整数除法）——这就是 Civ V 里“一堆锤子但没饭吃”的起点反而得分低的原因。第 3 环只做简单加权，影响最小。</p><p>⑤ 三圈合计垃圾格超过 9 个（<code>maximumJunk</code>）直接否决——沙漠、雪地、山脉多到一定程度就不该开城。</p><p>⑥ 如果这格落在已经选定的起点附近，<code>closeStartPenalty</code> 大于 0：先否决，再把分数按惩罚百分比扣掉。惩罚表见下一段。</p></div></div>
+<p>三个下限常量和四张分数表（Kotlin REPL 实测源码常量，逐格复算无误）。读法：<strong>下限表</strong>是“到第 N 环为止，累计至少要有多少粮/锤/优质格”；<strong>分数表</strong>把“累计数量”映射成分数，第 1 环与第 2 环各一套。</p>
+<table><thead><tr><th scope="col">环</th><th scope="col">粮下限</th><th scope="col">锤下限</th><th scope="col">优质格下限</th><th scope="col">该环计分公式</th></tr></thead><tbody>
+<tr><td>1</td><td>1</td><td>0</td><td>3</td><td>food[1] + prod[1] + 临河 + 优质×2 − 垃圾×3</td></tr>
+<tr><td>2</td><td>4</td><td>0</td><td>6</td><td>food[2] + prod[有效锤] + 临河 + 优质×2 − 垃圾×3</td></tr>
+<tr><td>3</td><td>4</td><td>2</td><td>8</td><td>粮 + 锤 + 优质 + 临河 − 垃圾×2</td></tr>
+</tbody></table>
+<table><thead><tr><th scope="col">数量 →</th><th scope="col">0</th><th scope="col">1</th><th scope="col">2</th><th scope="col">3</th><th scope="col">4</th><th scope="col">5</th><th scope="col">6</th><th scope="col">7</th><th scope="col">8</th><th scope="col">9</th><th scope="col">10</th></tr></thead><tbody>
+<tr><td>第 1 环粮分</td><td>0</td><td>8</td><td>14</td><td>19</td><td>22</td><td>24</td><td>25</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td>第 1 环锤分</td><td>0</td><td>10</td><td>16</td><td>20</td><td>20</td><td>12</td><td>0</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td>第 2 环粮分</td><td>0</td><td>2</td><td>5</td><td>10</td><td>20</td><td>25</td><td>28</td><td>30</td><td>32</td><td>34</td><td>35</td></tr>
+<tr><td>第 2 环锤分</td><td>0</td><td>10</td><td>20</td><td>25</td><td>30</td><td>35</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+</tbody></table>
+<p>代入一个例子，把三环串起来。假设某个内陆起点（不临海，没有 +40）三圈累计如下，且没有落在别的起点附近（<code>closeStartPenalty = 0</code>）：</p>
+<table><thead><tr><th scope="col">环</th><th scope="col">累计粮/锤/优质/垃圾/临河</th><th scope="col">下限判定</th><th scope="col">计算</th><th scope="col">得分</th></tr></thead><tbody>
+<tr><td>1</td><td>3 / 2 / 3 / 1 / 2</td><td>3≥1、2≥0、3≥3 通过</td><td>19 + 16 + 2 + 3×2 − 1×3</td><td>40</td></tr>
+<tr><td>2</td><td>8 / 5 / 7 / 2 / 3</td><td>8≥4、5≥0、7≥6 通过</td><td>32 + 30 + 3 + 7×2 − 2×3</td><td>73</td></tr>
+<tr><td>3</td><td>11 / 7 / 9 / 2 / 4</td><td>11≥4、7≥2、9≥8 通过</td><td>11 + 7 + 9 + 4 − 2×2</td><td>27</td></tr>
+</tbody></table>
+<p>合计 <code>startScore = 40 + 73 + 27 = 140</code>，且 <code>isGoodStart</code> 保持为真。注意第 2 环的粮食查表是 <code>secondRingFoodScores[8] = 32</code>（8 不超过 10），锤子因为 <code>5 &lt; 8×2 = 16</code> 被折算成 <code>(8 + 1) / 2 = 4</code>，查到 <code>secondRingProdScores[4] = 30</code>。同一个起点若临海，先加 40 得 180。</p>
+<p>还没完：一旦某个格子被选为起点，它周围会被打上“别靠近”的惩罚，这就是前面反复提到的 <code>closeStartPenalty</code>。</p>
+<div class="paired"><div><pre><code><span class="comment">// RegionStartFinder.setRegionStart 与 MapGenTileData.addCloseStartPenalty。问：起点周围怎么“封地”？</span>
+private fun setRegionStart(region: Region, position: HexCoord, tileData: TileDataMap) {
+    region.startPosition = position
+    for ((ring, penalty) in closeStartPenaltyForRing)        <span class="comment">// ① 逐环打惩罚</span>
+        for (outerTile in region.tileMap[position].getTilesAtDistance(ring))
+            tileData[outerTile]!!.addCloseStartPenalty(penalty)
+}
+
+fun addCloseStartPenalty(penalty: Int) {
+    if (closeStartPenalty == 0) closeStartPenalty = penalty   <span class="comment">// ② 第一次直接写</span>
+    else {
+        closeStartPenalty = max(closeStartPenalty, penalty)
+        closeStartPenalty = min(97, (closeStartPenalty * 1.2f).toInt())   <span class="comment">// ③ 重叠取大再 ×1.2</span>
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt">本地 RegionStartFinder.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt#L225">setRegionStart · L225</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapGenTileData.kt#L32">addCloseStartPenalty · MapGenTileData L32</a></p></div><div><p>一个起点选定了，它周围就成了“已占区”。这一段往周围打上随距离衰减的惩罚，让下一个挑起点的区域自动绕开——脑内模型是<strong>圈地挂牌</strong>：离我越近，牌子上“禁止开店”的力度越大。</p><p>① 选定起点后，按 <code>closeStartPenaltyForRing</code> 给每一环的格子加惩罚。这张表是“离得多近就多不该再开城”：0 环（起点自己）99、1 环 97、2 环 95、3 环 92、4 环 89、5 环 69、6 环 57、7 环 24……到 13 环只剩 4。源码注释说 14 环开外两个文明都能各自扩地而不抢地块。距离越近惩罚越接近 100%，等于强烈禁止；到外圈迅速衰减。</p><p>② 一个格子第一次吃到惩罚时直接记下。</p><p>③ 已有惩罚的格子再吃到一次：取<strong>较大</strong>的那个再乘 1.2、封顶 97——重叠只会让惩罚更重，不会重置或减轻；乘 1.2 是整数运算（<code>toInt</code>），97 会保持在 97。这笔账之后直接进 <code>evaluateTileForStart</code> 的第 ⑥ 步：<code>isGoodStart = false</code>，分数再扣掉惩罚百分比——惩罚基本等价于“排除”，只是还留了分数供最终兜底时排序。</p></div></div>
+</section>
+
+<section id="normalize"><h2>3. 修正起点与文明落位</h2>
+<p><code>RegionStartFinder</code> 挑起点时查的是<strong>格子的种类</strong>——几格粮、几格锤、几格垃圾，不看真实产出，也从不改地图；起点旁边冻着冰、一环连一块产粮地都没有，它管不着。<code>StartNormalizer</code> 回答的问题是：假如玩家现在就在这里落城，前几十回合转不转得起来？它像个验收员，对每个起点逐项体检、当场改地图：清冰、垫丘陵、塞粮、塞早期资源。</p>
+<div class="paired"><div><pre><code><span class="comment">// StartNormalizer.normalizeStart（完整）。问：这个起点能玩吗，缺什么？</span>
+fun normalizeStart(startTile: Tile, tileMap: TileMap, tileData: TileDataMap,
+        ruleset: Ruleset, isMinorCiv: Boolean) {
+    for (tile in startTile.neighbors) {                       <span class="comment">// ① 清掉邻格不可通行特征</span>
+        val lastTerrain = tile.terrainFeatureObjects.lastOrNull { it.impassable }
+        if (lastTerrain != null) tile.removeTerrainFeature(lastTerrain.name)
+    }
+
+    if (!isMinorCiv &amp;&amp; tileMap.mapParameters.getStrategicBalance())
+        placeStrategicBalanceResources(startTile, ruleset, tileData)   <span class="comment">// ② 战略平衡保底</span>
+
+    normalizeProduction(startTile, isMinorCiv, ruleset, tileData)      <span class="comment">// ③ 补生产力</span>
+
+    val foodBonusesNeeded = calculateFoodBonusesNeeded(startTile, isMinorCiv, ruleset, tileMap)
+    placeFoodBonuses(isMinorCiv, startTile, ruleset, foodBonusesNeeded) <span class="comment">// ④ 补粮食/绿洲</span>
+
+    if (isMinorCiv) return
+    addProductionBonuses(startTile, ruleset)                  <span class="comment">// ⑤ 草地太多时补石头类</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt">本地 StartNormalizer.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt#L23">normalizeStart · L23</a></p></div><div><p>① 问题“出生地旁边有格上不了工”：删掉邻格（不含起点自己）最顶层的不可通行特征，原版里主要是冰——城市第一环有一格永远上不了工，开局就矮人一截。</p><p>② 问题“这家玩家会不会缺某类关键战略资源”：<strong>勾选 Strategic Balance</strong>（MapParametersTable L395）就给起点旁各放一份带 “Guaranteed with Strategic Balance resource option” 的资源（马、铁、煤、石油等），管“军事不卡死”，细节在资源一节。</p><p>③ 问题“开局造得出东西吗”：见下面 <code>normalizeProduction</code>——锤太少就垫丘陵。</p><p>④ 问题“开局养得起人吗”：见下面两段——按缺口档位补粮。</p><p>⑤ 问题“周围全是草地、一块锤都没有”：<code>addProductionBonuses</code> 往草地上放带生产力的奖励资源（比如石头）。城邦（<code>isMinorCiv = true</code>）走到 ④ 为止——它不扩张不造移民，标准更松。</p><p>整段的顺序是<strong>先解锁、再补锤、再补粮</strong>：冰不清掉补什么都被它压着；锤决定“造得出”，粮决定“养得起”，两者都是开局刚需，所以按固定次序各查一遍。判断用的全是 <code>getPotentialYield</code>（改良后潜在产出），即“这块地<strong>最好能</strong>产出多少”，不是“现在产出多少”——生成器假设玩家会正常开发周边。</p></div></div>
+<div class="paired"><div><pre><code><span class="comment">// StartNormalizer.normalizeProduction（部分代码）。问：开局造得出东西吗？</span>
+val innerProduction = startTile.neighbors
+    .sumOf { getPotentialYield(it, Stat.Production).toInt() }        <span class="comment">// 一环潜在锤</span>
+val outerProduction = startTile.getTilesAtDistance(2)
+    .sumOf { getPotentialYield(it, Stat.Production).toInt() }        <span class="comment">// 二环潜在锤</span>
+val earlyProduction = startTile.getTilesInDistanceRange(1..2).sumOf {   <span class="comment">// ① 开局立刻可用的锤</span>
+    if (getPotentialYield(it, Stat.Food, unimproved = true) &gt; 0f)
+        getPotentialYield(it, Stat.Production, unimproved = true).toInt()
+    else 0
+}
+
+if (innerProduction == 0
+    || (innerProduction &lt; 2 &amp;&amp; outerProduction &lt; 8)
+    || (isMinorCiv &amp;&amp; innerProduction &lt; 4)) {                      <span class="comment">// ② 锤太差 → 垫一块丘陵</span>
+    val hillSpot = startTile.neighbors.filter {
+        it.isLand &amp;&amp; it.terrainFeatures.isEmpty()
+            &amp;&amp; !it.isAdjacentTo(Constants.freshWater) &amp;&amp; !it.isImpassible()
+    }.toList().randomOrNull(rng)
+    val hillEquivalent = ruleset.terrains.values.firstOrNull {
+        it.type == TerrainType.TerrainFeature &amp;&amp; it.production &gt;= 2
+            &amp;&amp; !it.hasUnique(UniqueType.RareFeature)
+    }?.name
+    if (hillSpot != null &amp;&amp; hillEquivalent != null)
+        hillSpot.addTerrainFeature(hillEquivalent)
+}
+
+if (!isMinorCiv &amp;&amp; innerProduction &lt; 3 &amp;&amp; earlyProduction &lt; 6) {    <span class="comment">// ③ 早期战略资源补锤</span>
+    <span class="comment">// 从“时代靠前”的战略资源里挑一个，放到二环</span>
+    ...
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt">本地 StartNormalizer.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt#L46">normalizeProduction · L46</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt#L310">getPotentialYield · L310</a></p></div><div><p>这一段回答的问题是：开局头几回合，这座城市造不造得出东西？先数三个数——<code>innerProduction</code>（一环锤）、<code>outerProduction</code>（二环锤）、<code>earlyProduction</code>（1～2 环里<strong>同时带粮</strong>的锤），然后按“差到什么程度”决定垫不垫、垫什么。</p><p>① <code>earlyProduction</code> 只数带粮的锤，是这段的灵魂：人口要吃饭，一块纯锤地（干丘陵）得靠别处的粮养着才上得了工，粮锤兼有的地前几回合才真正转得动。<code>getPotentialYield(tile, stat)</code> 算的是“连最好改良都算上”的潜在产出，<code>unimproved = true</code> 只看原生——所以它数的是“不用工人、开局立刻可用”的部分。</p><p>② 触发垫丘陵的三种情况：一环 0 锤（彻底废）、一环不到 2 且二环不到 8（整体偏弱）、城邦一环不到 4（城邦只有一座城、不扩张，标准反而更严）。垫的“丘陵”不写死名字，按“是地形特征、生产 ≥2、非稀有”从规则集现查——模组换了丘陵照样能垫。位置挑<strong>无特征、不临淡水、可通行</strong>的陆地，临淡水的格子留给农田更值。</p><p>③ 顶锤还是早不出东西（一环不到 3 锤、早期产能不到 6），就从“时代在前三分之一”的战略资源里挑一种放到二环——通常正是玩家不久就能开发的那批（马、铁）。放置走资源工具（下一节），会查“能不能自然长在这”。</p></div></div>
+<p>锤查完了查粮。粮这一侧分两步：先算“缺几份”（<code>calculateFoodBonusesNeeded</code>），再决定“怎么放”（<code>placeFoodBonuses</code>）。第一步的全部输出就是那一个整数，第二步只管照数执行：</p>
+<div class="paired"><div><pre><code><span class="comment">// StartNormalizer.calculateFoodBonusesNeeded（部分代码）。问：这里养得起人吗？</span>
+val innerFood = startTile.neighbors
+    .sumOf { (getPotentialYield(it, Stat.Food).pow(2) / 4).toInt() }    <span class="comment">// ① 平方权重：内环</span>
+val outerFood = startTile.getTilesAtDistance(2)
+    .sumOf { (getPotentialYield(it, Stat.Food).pow(2) / 4).toInt() }    <span class="comment">// ① 平方权重：外环</span>
+val totalFood = innerFood + outerFood
+val innerNativeTwoFood = startTile.neighbors.count {
+    getPotentialYield(it, Stat.Food, unimproved = true) &gt;= 2f }
+val outerNativeTwoFood = startTile.getTilesAtDistance(2).count { ... }
+val totalNativeTwoFood = innerNativeTwoFood + outerNativeTwoFood
+
+var bonusesNeeded = if (minorCiv) {
+    when { totalFood &lt; 12 || innerFood &lt; 4 -&gt; 2; totalFood &lt; 16 || innerFood &lt; 9 -&gt; 1; else -&gt; 0 }
+} else {
+    when {                                                             <span class="comment">// ② 大文明 5 档</span>
+        innerFood == 0 &amp;&amp; totalFood &lt; 4 -&gt; 5
+        totalFood &lt; 6 -&gt; 4
+        totalFood &lt; 8 || (totalFood &lt; 12 &amp;&amp; innerFood &lt; 5) -&gt; 3
+        (totalFood &lt; 17 &amp;&amp; innerFood &lt; 9) || totalNativeTwoFood &lt; 2 -&gt; 2
+        (totalFood &lt; 24 &amp;&amp; innerFood &lt; 11) || totalNativeTwoFood == 2
+            || innerNativeTwoFood == 0 || totalFood &lt; 20 -&gt; 1
+        else -&gt; 0
+    }
+}
+if (tileMap.mapParameters.getLegendaryStart()) bonusesNeeded += 2     <span class="comment">// ③ 传奇开局</span>
+
+if (!minorCiv &amp;&amp; bonusesNeeded &lt; 3 &amp;&amp; totalNativeTwoFood == 0) {         <span class="comment">// ④ 改造地形</span>
+    <span class="comment">// 把一环或二环一块空地的基础地形改成产粮 ≥2 的地形</span>
+    ...
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt">本地 StartNormalizer.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt#L175">calculateFoodBonusesNeeded · L175</a></p></div><div><p>这一段回答的问题是：这座城市<strong>养得起人吗</strong>？输出只有一个数——<code>bonusesNeeded</code>，“还该补几份带粮的奖励资源”。脑内模型是一张<strong>体检单</strong>：先算两个体检指标，再对着一张分级表读出“缺几份”。</p><p>① 指标一：粮势（<code>innerFood</code> / <code>outerFood</code> / <code>totalFood</code>）。每格的粮<strong>先平方再除 4</strong> 才累加：2 粮算 1、3 粮算 2、4 粮算 4、5 粮算 6。为什么不直接加？市民每人吃 2 粮，城市增长靠的是<strong>余粮</strong>——一块 4 粮地顶两块 2 粮地（4 分对 2 分），高产粮地比平地值钱得多。指标二：原生双粮格数（<code>totalNativeTwoFood</code>，内环外环分开数）。这是“<strong>底子</strong>”：不用任何改良、开局立刻就有 2 粮的地块数量。</p><p>② 分级表就是代码里的 <code>when</code>——从上往下、命中即止，档位 5→0 表示“越缺补得越多”。大文明那 5 行不用逐行背，抓结构：<strong>前 3 行看粮势</strong>（粮势极差补 5、很差补 4、差补 3），<strong>后 2 行看底子</strong>（粮势尚可但原生 2 粮格不到 2 块 → 补 2；勉强及格 → 补 1）。底子为什么要单独设两档？粮势可以被“改良后才有粮”的地块撑起来（比如建农场才有 2 粮的平原），而开局头几十回合吃的是原生粮地——粮势及格但底子为 0 的城市，前期照样饿。城邦只分 0～2 档：它不扩张、不造移民，饿不死就行。</p><p>③ 勾了传奇开局（Legendary Start）就在读出的档位上<strong>再加 2</strong>——不是改阈值，是简单加档，让“传奇”图明显比普通图肥。</p><p>④ 兜底手术：粮势过得去（档位 &lt; 3）但一块原生 2 粮格都没有时，补两三份资源<strong>治不了根</strong>——干脆把一块空地的基础地形直接改成“原生 2 粮”的地形（原版即草地）。连可改的空地都找不到（全被占、全是特征），代码注释叫它“无药可救的平原”，档位强制拉到 3，交给下一步硬塞资源。</p></div></div>
+<p>补给怎么放也有讲究：先一环、再二环、然后三环，还要保证两个起点之间不会互相抢粮。</p>
+<div class="paired"><div><pre><code><span class="comment">// StartNormalizer.placeFoodBonuses（部分代码）。问：补的粮怎么摆不扎堆？</span>
+val oasisEquivalent = ruleset.terrains.values.firstOrNull {
+    it.type == TerrainType.TerrainFeature &amp;&amp; it.hasUnique(UniqueType.RareFeature)
+        &amp;&amp; it.food &gt;= 2 &amp;&amp; it.food + it.production + it.gold &gt;= 3
+        &amp;&amp; it.occursOn.any { base -&gt; ruleset.terrains[base]!!.type == TerrainType.Land }
+}                                                                  <span class="comment">// ① 绿洲等价物</span>
+val rangeForBonuses = if (minorCiv) 2 else 3
+val candidatePlots = startTile.getTilesInDistanceRange(1..rangeForBonuses)
+    .filter { it.resource == null &amp;&amp; oasisEquivalent !in it.terrainFeatureObjects }
+    .shuffled().sortedBy { it.aerialDistanceTo(startTile) }.toMutableList()  <span class="comment">// ② 按环排序</span>
+
+while (bonusesStillNeeded &gt; 0 &amp;&amp; candidatePlots.isNotEmpty()) {
+    val plot = candidatePlots.first()
+    candidatePlots.remove(plot)
+    if (plot.getBaseTerrain().hasUnique(UniqueType.BlocksResources,
+            GameContext(attackedTile = plot))) continue            <span class="comment">// ③ 雪丘之类不放</span>
+    val validBonuses = ruleset.tileResources.values.filter {
+        it.resourceType == ResourceType.Bonus &amp;&amp; it.food &gt;= 1
+            &amp;&amp; it.generatesNaturallyOn(plot) }
+    val goodPlotForOasis = canPlaceOasis &amp;&amp; plot.lastTerrain.name in oasisEquivalent!!.occursOn
+    if (validBonuses.isNotEmpty() || goodPlotForOasis) {
+        if (goodPlotForOasis) { plot.addTerrainFeature(oasisEquivalent!!.name); canPlaceOasis = false }
+        else plot.setTileResource(validBonuses.random(rng))
+        if (plot.aerialDistanceTo(startTile) == 1) {
+            placedInFirst++
+            if (placedInFirst == 2)
+                candidatePlots.sortBy { abs(it.aerialDistanceTo(startTile) * 10 - 22) }   <span class="comment">// ④ 一环满 2：重排为 2,3,1</span>
+        } else if (plot.aerialDistanceTo(startTile) == 2) {
+            placedInSecond++
+            if (placedInSecond == 3) candidatePlots.sortByDescending
+                { abs(it.aerialDistanceTo(startTile) * 10 - 17) }   <span class="comment">// ④ 二环满 3：重排为 3,1,2</span>
+        }
+        bonusesStillNeeded--
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt">本地 StartNormalizer.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt#L243">placeFoodBonuses · L243</a></p></div><div><p>第一步读出“缺几份”，这一步照数执行，脑内模型是<strong>往井字格里摆子</strong>：一环摆 2 个、二环摆 3 个，摆满了就轮着往外圈走，别把补给全压在最内圈。</p><p>① 绿洲不写死名字，按“稀有特征、粮 ≥2、总产出 ≥3、能长在陆地上”现查等价物——模组换一种绿洲照用。每个起点最多放一个，放在第一个合适的位置上，算“豪华补给”。</p><p>② 候选格先打乱再按到起点的距离排序，处理顺序就是“一环 → 二环 → 三环”，同环内随机；已被资源占的、已有绿洲特征的排除。</p><p>③ 每块地只放“这块地本来就能长”的东西：基础地形带 “Blocks Resources” 的（原版雪原丘陵）跳过——不在雪地里长小麦；能放的也从“奖励类、粮 ≥1、自然生成于此”里随机挑——不给冻土塞香蕉。</p><p>④ 井字格机关：<strong>一环放满 2 份</strong>后，剩余候选按 <code>abs(距离×10 − 22)</code> 重排——这个数在距离 2 时最小、距离 3 次之、距离 1 最大，所以新顺序是“二环 → 三环 → 一环”；<strong>二环放满 3 份</strong>后按 <code>abs(距离×10 − 17)</code> <strong>降序</strong>排，新顺序是“三环 → 一环 → 二环”。一句话：哪个环配额满了，就把哪个环挪到队尾，剩下的环顶上来——源码注释直接写着 <code>ring order 2,3,1</code> 与 <code>3,1,2</code>。数字是经验值，记住“内圈有配额、满了就轮换”就够，不必背。</p></div></div>
+<p>起点全部修正完，地图上就有了 N 个“装修好的房间”。最后一步是分房：每个文明的开局偏好（start bias）先分桶，再按“越挑剔越先挑”的顺序挑房间：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegions.assignRegions（startBias 分桶，部分代码）。问：谁先挑房间？</span>
+val civBiases = civilizations.associateWith {
+    ruleset.nations[it.civName]!!.getStartBias(ruleset, it.getGameContextForStartBias())
+}
+val civsByBiasType = civBiases.entries.groupBy(
+    keySelector = { (_, startBias) -&gt;
+        when {
+            gameParameters.noStartBias -&gt; BiasTypes.Random                  <span class="comment">// ① 关掉偏好</span>
+            startBias.any { it.equalsPlaceholderText("Avoid []") } -&gt; BiasTypes.Negative
+            "Coast" in startBias -&gt; BiasTypes.Coastal
+            startBias.isNotEmpty() -&gt; BiasTypes.Positive
+            else -&gt; BiasTypes.Random
+        }
+    },
+    valueTransform = { (civ, _) -&gt; civ }
+)
+<span class="comment">// 分完桶后的处理顺序（源码略）：
+// ② 临海 → 正面（单偏好的先挑）→ 正面兜底 → 负面（避开项多的先挑）→ 随机
+// ③ 每挑中一间：assignCivToRegion —— 记 startingLocationsByNation + 打四种 impact
+// ④ 城邦：MinorCivPlacer 分到区域，逐格随机落位、impact 避让，再 normalizeStart(isMinorCiv = true)</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">本地 MapRegions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L255">startBias 分桶 · L255</a></p></div><div><p>区域是房间、文明是房客。每个文明在规则集里写着“我想住什么样的房”（start bias），但房间只有 N 间、还已经被起点修正好。谁先挑？原则是<strong>越挑的先挑</strong>：只肯住海景房的比“随便什么都行”的先挑，否则等随机房客把海景房挑走了，挑剔的就无房可选。</p><p>① 按偏好文本把文明分进四个桶：勾了“无开局偏好”全进随机桶；否则带 “Avoid []” 的算负面、含 “Coast” 的算临海、有其它偏好的算正面、什么都没写的算随机。一个文明只进一个桶。</p><p>② 处理顺序是<strong>临海 → 正面 → 正面兜底 → 负面 → 随机</strong>。正面偏好按“只写一条偏好的先挑”（选择余地小）；单条偏好的文明对不上时还能进“兜底轮”——挑与想要类型最像的区域；负面偏好按“避开的种类越多越先挑”；随机桶用 <code>stateBasedRandom</code> 挑没被占的区域。</p><p>③ 每挑中一间就调 <code>assignCivToRegion</code>：把文明记进 <code>startingLocationsByNation</code>，并往地图打四种 impact——资源与城邦选址的“避让标记”，第 4 节细讲。</p><p>④ 城邦由 <code>MinorCivPlacer</code> 安排：按“城邦数 / 区域数”往各区域分若干，剩下的给无人大陆、共享奢侈品的区域、肥沃度最低的区域；落位逐格随机、撞 <code>MinorCiv</code> impact 就跳过（保持间距），再跑一遍 <code>normalizeStart(isMinorCiv = true)</code>。</p></div></div>
+</section>
+
+<section id="resources"><h2>4. 资源摆放：服务玩法</h2>
+<p>资源阶段的主入口是 <code>placeResourcesAndMinorCivs</code>。注意自然奇观被特意排在了资源之前——它有“离起点至少 5 格”之类的条件，先放能让后续资源避开它：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegions.placeResourcesAndMinorCivs（完整）。问：先放什么、后放什么？</span>
+fun placeResourcesAndMinorCivs(tileMap: TileMap, minorCivs: List&lt;Civilization&gt;) {
+    placeNaturalWonderImpacts(tileMap)                                   <span class="comment">// ① 奇观先占位</span>
+
+    val (cityStateLuxuries, randomLuxuries) =
+        LuxuryResourcePlacementLogic.assignLuxuries(regions, tileData, ruleset)  <span class="comment">// ② 先分配奢侈品</span>
+    MinorCivPlacer.placeMinorCivs(regions, tileMap, minorCivs, tileData, ruleset) <span class="comment">// ③ 城邦落位</span>
+    LuxuryResourcePlacementLogic.placeLuxuries(regions, tileMap, tileData, ruleset,
+        cityStateLuxuries, randomLuxuries)                                <span class="comment">// ④ 奢侈品落图</span>
+    StrategicBonusResourcePlacementLogic.placeStrategicAndBonuses(
+        tileMap, regions, tileData)                                       <span class="comment">// ⑤ 战略与奖励资源</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">本地 MapRegions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L453">placeResourcesAndMinorCivs · L453</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L217">NaturalWonderGenerator 调用点 · MapGenerator L217</a></p></div><div><p>① 给每个自然奇观格打四种 impact（半径 1），后面所有资源都会避开奇观及其邻格。</p><p>② <code>assignLuxuries</code> <strong>先决定“谁拥有哪种奢侈品”，还没往地图上放</strong>。它返回两个清单：预留给城邦的奢侈品、以及可以撒到全图的随机奢侈品。先分配再落位的原因是“每个区域一种”这个约束必须在全局层面协调，不能边放边定。</p><p>③ 城邦这时候才真正选地块落位——因为它的位置要参考“哪些奢侈品已经预留给它”。</p><p>④ 奢侈品落图分四批：大文明起点附近、城邦起点附近、每个区域的“本地产”地块、全图随机撒。顺序决定了稀缺资源的优先级。</p><p>⑤ 战略资源与奖励资源最后放。它们数量大、依赖地形频率，放在奢侈品之后可以避开已经定好的位置。自然奇观先于全部资源、城邦先于奢侈品的顺序，本质都是“稀缺的、有硬约束的先来”。</p></div></div>
+<p>这一节反复出现的 “impact” 是一张<strong>生成期的占位图</strong>：它不写进存档，只记录“这类东西已经在附近出现过”，让后续放置先绕开、绕不开才挑影响最小的。把它想成每个已放置物留下的“气味”即可，理解了它，资源分配的目标就清楚了一半：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegions.TileDataMap.placeImpact（完整）。问：“这里已经有了”怎么记？</span>
+fun placeImpact(type: MapRegions.ImpactType, tile: Tile, radius: Int) {
+    this[tile]!!.impacts[type] = 99                              <span class="comment">// ① 中心格：已占</span>
+    if (radius &lt;= 0) return
+
+    for (ring in 1..radius) {
+        val ringValue = radius - ring + 1                        <span class="comment">// ② 越远值越小</span>
+        for (outerTile in tile.getTilesAtDistance(ring)) {
+            val data = this[outerTile]!!
+            if (data.impacts.containsKey(type))
+                data.impacts[type] = min(50, max(ringValue, data.impacts[type]!!) + 2)
+            else
+                data.impacts[type] = ringValue
+        }
+    }
+}
+<span class="comment">// ③ 调用方传的半径（assignCivToRegion 等）：
+//    大文明起点 MinorCiv 6 / Luxury 3 / Strategic 0 / Bonus 3
+//    城邦起点   MinorCiv 4 / Luxury 3 / Strategic 0 / Bonus 3
+//    自然奇观   四种各 1</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">本地 MapRegions.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L36">placeImpact · L36</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt#L473">ImpactType · L473</a></p></div><div><p>impact 的脑内模型是<strong>气味</strong>：每放一个东西，它周围就散出一圈“这类东西的气味”，越近越浓。后来者挑位置时先闻气味——太浓的地方不选，实在没得选才挑最淡的。</p><p>① 中心格直接记 99，表示“这里已经有该类东西了”。</p><p>② 每往外一环，值从 <code>radius</code> 递减到 1。若某格已在同类 impact 里，取“较大值再 +2”（重叠加强），封顶 50。所以同一类资源扎堆时，周围的值会越来越高，后续放置越来越难在附近找到空位。</p><p>③ 四种 impact 类型是 <code>Strategic</code> / <code>Luxury</code> / <code>Bonus</code> / <code>MinorCiv</code>。它们的半径各不相同，直接决定了各类资源的“性格”：</p><ul><li>大文明起点：MinorCiv 半径 6（城邦至少离 6 格）、Luxury 半径 3、Strategic 半径 0、Bonus 半径 3。</li><li>城邦起点：MinorCiv 半径 4（城邦之间保持距离）、Luxury 半径 3、Strategic 半径 0、Bonus 半径 3。</li><li>自然奇观：四种各半径 1。</li></ul><p>战略资源半径 0 是关键：它只排斥自己这一格，不排斥旁边，所以马、铁可以成片出现在同一片草原上；奢侈品与奖励资源半径 3，避免一堆香料挤在一起让地图价值失衡；城邦半径最大，保证城邦不会贴着玩家首都。</p></div></div>
+<p>奢侈品的分配是“每个区域一种”，具体规则如下：</p>
+<div class="paired"><div><pre><code><span class="comment">// LuxuryResourcePlacementLogic.assignLuxuries（部分代码）。问：每个区域特产什么？</span>
+val maxRegionsWithLuxury = when {                       <span class="comment">// ① 一种奢侈品最多几个区域</span>
+    regions.size &gt; 14 -&gt; 3
+    regions.size &gt; 10 -&gt; 2
+    else -&gt; 1
+}
+val assignableLuxuries = ruleset.tileResources.values.filter {
+    it.resourceType == ResourceType.Luxury
+        &amp;&amp; !it.hasUnique(UniqueType.LuxurySpecialPlacement)   <span class="comment">// ② 排除特殊摆放</span>
+        &amp;&amp; !it.hasUnique(UniqueType.CityStateOnlyResource) }  <span class="comment">// ② 排除城邦专属</span>
+val amountRegionsWithLuxury = HashMap&lt;String, Int&gt;()
+
+for (region in regions.sortedBy { getRegionPriority(ruleset.terrains[it.type]) }) {
+    val candidateLuxuries = getCandidateLuxuries(...)     <span class="comment">// ③ 见下</span>
+    if (candidateLuxuries.isEmpty()) continue
+    region.luxury = candidateLuxuries.randomWeighted(regionRng) {
+        val relativeWeight = ...                          <span class="comment">// 规则集权重，默认 1</span>
+        relativeWeight / (1f + amountRegionsWithLuxury[it.name]!!)   <span class="comment">// ④ 重复递减</span>
+    }.name
+    amountRegionsWithLuxury[region.luxury!!] = amountRegionsWithLuxury[region.luxury]!! + 1
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/LuxuryResourcePlacementLogic.kt">本地 LuxuryResourcePlacementLogic.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/resourceplacement/LuxuryResourcePlacementLogic.kt#L28">assignLuxuries · L28</a></p></div><div><p>奢侈品的分配目标是“每个区域一种特产”，这样不同文明的物产天然不同、贸易才有意义。注意这一步只<strong>分名字</strong>，不落图。</p><p>① 区域少的时候一种奢侈品只属于一个区域（小图常见）；区域多了才允许 2～3 个区域共享同一种，否则奢侈品种类不够分。这就是“同图不同文明物产不同”的来源——它由区域数驱动，不需要手工配置。</p><p>② 带 “Special placement during map generation”（原版大理石）和 “Can only be created by Mercantile City-States” 的奢侈品不参与常规分配，前者另有保底、后者专供城邦。</p><p>③ 候选过滤有三层：先把“已分配到上限”的奢侈品剔除；再检查水域奢侈品——它要求区域至少有 12 个临海地块<strong>且</strong>区域起点临海，否则内陆区域永远拿不到鲸鱼、珍珠这类海上资源；条件都满足还能选中“权重为空”的奢侈品。找不到时逐级放宽（先只看海岸条件、再完全不管），保证总有候选。</p><p>④ 挑中的方式是按权重的随机：奢侈品自己可以带 “Generated with weight [N]”，同一种被选过的次数越多，分母越大、越不容易再被选。所以“每个区域一种”不是硬性互斥，而是“尽量分散”。</p></div></div>
+<p>分配完名字，还要真正放到地图上。<code>placeLuxuries</code> 按四批放，每批的目标不同：</p>
+<table><thead><tr><th scope="col">批次</th><th scope="col">目标</th><th scope="col">落点与例外</th></tr></thead><tbody>
+<tr><td>大文明起点（placeLuxuriesAtMajorCivStartLocations）</td><td>每个起点的本区奢侈品至少 2 份</td><td>先查一环二环、每 2 格放 1；不够扩到三环；再不够从随机清单里补 1 份。肥沃度低于全图平均的区域多 1 份，传奇开局多 1 份</td></tr>
+<tr><td>城邦起点（placeLuxuriesAtMinorCivStartLocations）</td><td>城邦附近能拿到专属奢侈品</td><td>75% 概率先试城邦奢侈品、再试随机/区域奢侈品；25% 反过来</td></tr>
+<tr><td>区域本地产（addRegionalLuxuries）</td><td>本区奢侈品在区域内成片出现</td><td>目标份数 ≈ 区域地块数/600 加调整量，按到起点距离加随机扰动排序；水域奢侈品只找该大陆的岸边</td></tr>
+<tr><td>全图随机（addRandomLuxuries）</td><td>地图整体均匀分布</td><td>总量 ≈ 地块数^0.45 × 设置百分比 + 随机量，每种按 <code>randomLuxuryRatios</code> 分摊</td></tr>
+</tbody></table>
+<p>战略资源与奖励资源的思路是“按地形频率”，而不是“按区域份额”：</p>
+<div class="paired"><div><pre><code><span class="comment">// StrategicBonusResourcePlacementLogic.placeStrategicAndBonuses（完整骨架）。问：资源怎么做到不偏不倚？</span>
+internal fun placeStrategicAndBonuses(tileMap: TileMap, regions: ArrayList&lt;Region&gt;,
+        tileData: TileDataMap) {
+    val strategicResources = ruleset.tileResources.values
+        .filter { it.resourceType == ResourceType.Strategic }
+    val bonusMultiplier = tileMap.mapParameters.getMapResources().bonusFrequencyMultiplier
+    val landList = ArrayList&lt;Tile&gt;()
+    val ruleLists = buildRuleLists(ruleset, tileMap, regions, fallbackStrategic, strategicResources)  <span class="comment">// ① 条件建索引</span>
+    <span class="comment">// 先一趟遍历，把满足每种条件的地块收进对应列表</span>
+
+    val totalPlaced = HashMap&lt;TileResource, Int&gt;()
+    placeMajorDepositsOnLand(ruleset, ruleLists, totalPlaced, tileData, fallbackStrategic)   <span class="comment">// ② 陆地大矿</span>
+    placeSmallDepositsOfModernStrategicResourcesOnCityStates(
+        ruleset, strategicResources, tileMap, totalPlaced, tileData)                        <span class="comment">// ② 城邦附近现代资源</span>
+    placeMinorDepositsOnLand(bonusMultiplier, landList, tileData, strategicResources,
+        fallbackStrategic, totalPlaced)                                                     <span class="comment">// ② 陆地小矿</span>
+    placeMajorDepositsOnWater(ruleset, ruleLists, totalPlaced, tileData, fallbackStrategic) <span class="comment">// ② 水域大矿</span>
+    ensureMinimumResourcesPerCiv(strategicResources, regions, totalPlaced, ruleset,
+        landList, tileMap, tileData)                                                        <span class="comment">// ③ 每文明保底</span>
+    placeBonusResources(ruleset, ruleLists, tileData, bonusMultiplier, tileMap)             <span class="comment">// ④ 奖励资源</span>
+    placeBonusInThirdRingOfStart(regions, ruleset, tileMap, tileData)                       <span class="comment">// ④ 起点三环保底</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/StrategicBonusResourcePlacementLogic.kt">本地 StrategicBonusResourcePlacementLogic.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/resourceplacement/StrategicBonusResourcePlacementLogic.kt#L40">placeStrategicAndBonuses · L40</a></p></div><div><p>战略与奖励资源不按区域分，而按“地形出现频率”撒——草原上本来就该长马，冻土上本来就该没铁。脑内模型是<strong>撒种子</strong>：每种资源有自己的土壤与密度，保底逻辑保证每个玩家至少分到关键的几颗。</p><p>① 规则集里的战略/奖励资源都按 “Generated on every [N] tiles + 条件” 或 “Generated with weight [N] + 条件” 声明。<code>buildRuleLists</code> 先把所有条件组合去重（<code>anonymizeUnique</code> 把 unique 的条件部分按字母排序，让“条件相同、资源不同”的规则共用一份地块列表），再一趟遍历把地块填进去——这是整个类里最贵的计算，注释说它是“BY FAR the most expensive”，去重就是为了省钱。</p><p>② 四轮放置：陆地大矿（按地形频率，默认每 25 格一份，地形可挂 “Every [N] tiles … major deposit”）、城邦附近的高时代战略资源（保证后期有煤/铝/铀可换）、陆地小矿（按 <code>baseMinorDepositFrequency = 30 × 倍率</code> 的数量随机挑，权重来自 “Minor deposits generated with weight”）、水域大矿（最后放，因为海岸太常见，避免过度聚集）。</p><p>③ 保底：每种战略资源若总数不到“每文明一份”，最多再补 2 份。这是“文明不会被某一种关键资源卡死”的硬约束。</p><p>④ 奖励资源按 “Generated on every [N] tiles” 频率放，且在起点三环额外放一份——开局的城市工作范围就是三环，保证有可就地开发的东西；若区域类型挂了 “Starts in regions of this type receive an extra [resource]”，三环放 2 份，放不下才退而放一个水产奖励资源。</p></div></div>
+<p>最后看落笔的那一层。<code>MapRegionResources</code> 的两个函数是所有资源放置的公共出口，一个按“频率”放、一个按“数量”放：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapRegionResources.placeResourcesInTiles（部分代码）。问：具体往哪一格放？</span>
+val amountToPlace = (tileList.size / frequency) + 1            <span class="comment">// ① 频率换算数量</span>
+val fallbackTiles = ArrayList&lt;Tile&gt;()
+for (tile in tileList) {                                        <span class="comment">// ② 第一趟：避开 impact</span>
+    if (tile.resource != null) continue
+    val possibleResourcesForTile = resourceOptions.filter { it.generatesNaturallyOn(tile) }
+    if (possibleResourcesForTile.isEmpty()) continue
+    if (tileData[tile]!!.impacts.containsKey(impactType)) {
+        fallbackTiles.add(tile)
+    } else {
+        val rng = GameContext(tile = tile).stateBasedRandom("MapRegionResources.placeResourcesInTiles")
+        val resourceToPlace = possibleResourcesForTile.randomWeighted(rng) { weightings[it] ?: 0f }
+        tile.setTileResource(resourceToPlace, majorDeposit)      <span class="comment">// ③ 按权重随机挑一种</span>
+        tileData.placeImpact(impactType, tile, baseImpact + rng.nextInt(randomImpact + 1))
+        amountPlaced++
+        if (amountPlaced &gt;= amountToPlace) return detailedPlaced
+    }
+}
+while (amountPlaced &lt; amountToPlace &amp;&amp; fallbackTiles.isNotEmpty()) {
+    val bestTile = fallbackTiles.minByOrNull { tileData[it]!!.impacts[impactType]!! }!!  <span class="comment">// ④ 第二趟挑影响最小</span>
+    ...
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/MapRegionResources.kt">本地 MapRegionResources.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/resourceplacement/MapRegionResources.kt#L26">placeResourcesInTiles · L26</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/resourceplacement/MapRegionResources.kt#L88">tryAddingResourceToTiles · L88</a></p></div><div><p>所有“放多少、放哪格”最终都汇到这两个函数。脑内模型是<strong>两趟采购</strong>：第一趟只在“干净”（无 impact 气味）的格子里放；没放够，第二趟退而求其次，每次挑气味最淡的格子补齐。</p><p>① 目标数量 = 地块数 ÷ 频率 + 1（+1 保证小列表也至少放一份，取整）。频率来自地形或资源的 unique，乘上界面的资源设置倍率。</p><p>② 第一趟只在<strong>没有被同类 impact 标记</strong>、且该资源能自然生成的格子上放。挑中的格子放完立刻打 impact，所以后面的循环会自动避开它周围。</p><p>③ 一格能长多种资源时（例如同一片草原能出小麦也能出马），按 “Generated with weight” 的权重随机——这是资源之间数量比例的控制点。</p><p>④ 如果第一趟没放够（格子被别的资源占了、或都被 impact 覆盖），第二趟从 fallback 里每次挑 <strong>impact 值最小</strong>的格子放；“抱歉我们确实得每放一次就重排一次列表”，因为每次放置都会改变 impact。第二趟会打破“避开扎堆”的约束，优先级低于第一趟——保证数量优先、美观其次。</p><p>另一个函数 <code>tryAddingResourceToTiles</code> 是“按数量放”的版本：它检查资源能否生成、可选地尊重 impact、还能用 <code>ratio &lt; 1</code> 隔几格放一个（例如起点修正里“每 2 格放 1 份奢侈品”）。<code>StartNormalizer</code>、奢侈品与保底逻辑都调它。</p></div></div>
+<aside class="callout"><strong>Godot 对照：把“公平层”和“风景层”分开</strong><p>这一课的代码可以整段搬到自己的生成器里，而且分界很清楚：噪声/地形是“风景层”，只管世界长什么样；区域、起点、资源保底是“公平层”，保证每个玩家都有得玩。Godot 里建议把两者写成两个独立步骤（甚至两个脚本），公平层只读地形数据、往一张“占位图”里写影响值，和 <code>TileDataMap.impacts</code> 的做法一致。另外，起点评分（三环阈值与分数表）是纯函数，输入一组地块质量、输出一个分数——这种函数最容易单独测试，别把它埋在生成流程里。数据（优先级、频率、权重）尽量留在 Resource/JSON，代码只负责读取，换一套数值不用改逻辑。Godot 4.x 均适用。</p></aside>
+</section>
+
+<section id="tradeoffs"><h2>5. 约束与取舍</h2>
+<p>把这一课散见的“为什么加这条规则”收拢成一张表。读法：<strong>第一列</strong>是谁在保证；<strong>第二列</strong>保证什么；<strong>第三列</strong>是“没有它会怎样”；<strong>第四列</strong>是源码位置。按“开局公平”和“分布合理”分两组。</p>
+<table><thead><tr><th scope="col">对象</th><th scope="col">保证什么</th><th scope="col">防住什么</th><th scope="col">源码位置</th></tr></thead><tbody>
+<tr><td colspan="4"><strong>开局公平</strong>——每个文明都玩得下去</td></tr>
+<tr><td>区域切分</td><td>每块区域肥沃度相近、数量恰好等于大文明数</td><td>有的文明被塞进贫瘠角落</td><td>divideRegion / splitRegion L162/L176</td></tr>
+<tr><td>起点三环阈值</td><td>一环至少 3 个优质格、二环至少 6 个</td><td>出生点没粮没锤，前期卡死</td><td>evaluateTileForStart L158</td></tr>
+<tr><td>closeStartPenalty</td><td>新起点离已有起点足够远</td><td>两家文明贴脸、开局抢地块</td><td>setRegionStart L225</td></tr>
+<tr><td>StartNormalizer</td><td>缺啥补啥：丘陵、粮食、绿洲、早期战略资源</td><td>地形运气决定开局成败</td><td>normalizeStart L23</td></tr>
+<tr><td>战略保底</td><td>每种战略资源至少每文明一份（最多再补 2）</td><td>关键军事资源全在图另一头</td><td>ensureMinimumResourcesPerCiv L168</td></tr>
+<tr><td>传奇/战略平衡选项</td><td>粮食 +2 档、每种战略资源各一份</td><td>高难度下开局不公平</td><td>calculateFoodBonusesNeeded L221、placeStrategicBalanceResources L102</td></tr>
+<tr><td colspan="4"><strong>分布合理</strong>——资源别扎堆、别打架</td></tr>
+<tr><td>impact 半径</td><td>城邦离起点 6 格、奢侈品/奖励资源半径 3</td><td>资源与城邦扎堆，地图价值失衡</td><td>placeImpact L36、assignCivToRegion L434</td></tr>
+<tr><td>每区域一种奢侈品</td><td>区域数 ≤10 时一种奢侈品只属一个区域</td><td>各文明物产雷同，贸易没意义</td><td>assignLuxuries L36</td></tr>
+<tr><td>水域奢侈品门槛</td><td>区域至少 12 个临海格且起点临海才可能拿到</td><td>内陆区域被分配永远拿不到的海上资源</td><td>getCandidateLuxuries L105</td></tr>
+<tr><td>放置两趟</td><td>先避开 impact，数量不够才挑影响最小</td><td>为凑数量把资源堆在一处</td><td>placeResourcesInTiles L26</td></tr>
+</tbody></table>
+<aside class="callout tradeoff"><strong>取舍：先保证公平，再谈好看</strong><p>这套流程的所有数字——阈值、分数表、惩罚环、频率、倍率——都是经验值，而且互相配合。改一个数字往往要连带看别的：把“山地对起点的分数”调高，就得同时想清楚稀缺山地是不是会被所有文明争抢。矩形二分的取舍已在第 1 节的“延伸”里细说：便宜、天然适配大陆与环绕，代价是边缘可能切出细长条（靠 <code>trim</code> 与列号重算补救）。做自己的游戏时，如果地图是手工设计的城池周边，可能根本不需要“区域自动切分”，但“起点评价 + 保底 + 占位图”这三件套几乎一定用得上。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>区域按肥沃度分：先按“肥沃度 /(1+已分文明数)”把大文明分到大陆，再递归二分到每城一块；区域类型由规则集 unique 的优先级决定，没人命中就是 Hybrid。</strong></li><li><strong>起点评价看三环累计：一环 3 个优质格、二环 6 个是硬门槛；分数查表（一环粮 0-25、二环粮 0-35），临海 +40，生产多于粮食 2 倍时会被折算。</strong></li><li><strong>选定起点就给周围打 closeStartPenalty（0 环 99、7 环 24、13 环 4），重叠取更大再 ×1.2；低肥沃区域先挑，后来的绕开。</strong></li><li><strong>StartNormalizer 是验收员：清冰（解锁邻格）、查锤（养得起工才转得动）、查粮（体检单：粮势用“粮²/4”加权、底子看原生 2 粮格，分级表读出缺几份就补几份）；RegionStartFinder 挑好坏，StartNormalizer 负责让每个起点都玩得下去。</strong></li><li><strong>资源投放先稀缺后充裕：自然奇观 → 奢侈品分配 → 城邦落位 → 奢侈品落图 → 战略/奖励；奢侈品种类按区域分，战略按地形频率，都靠 impact 图避免扎堆。</strong></li><li><strong>impact 是生成期占位图（中心 99、向外递减、封顶 50），它和起点惩罚一起，把“生成”从纯随机变成一组可解释的约束。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；不看正文讲清“区域怎么切”“一个起点怎么算分”“三类资源各是什么目标”，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. generateRegions 切分区域时，按什么来平衡各块的大小？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="面积相等只是巧合：4 块 146/84/128/128 明显不等。区域的目标是肥沃度相近，不是地块数相等。"><span>按地块数来平分</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="splitRegion 把区域 totalFertility 按份数百分比拆开，沿长边找最接近目标肥沃度的一刀；大陆之间也按 fertility/(1+已分数) 分配文明。"><span>按肥沃度来切分</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="大陆 ID 只用来筛选地块与判断环绕（continentID 与列号），不参与拆分比例。"><span>按大陆号来切分</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="列号只用于把大陆包成矩形、判断是否跨接缝；拆分点由肥沃度累加决定。"><span>按经度顺序切分</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>2. RegionStartFinder 判断一个格是不是好起点，主要看什么？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="evaluateTileForStart 累计一环到三环的 isFood/isProd/isGood/isJunk 数量，先比下限、再查表计分；临海另有 +40。"><span>三环内粮锤好坏格数</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="临河与临海只是候选分组和加分项；判定好坏的仍是三环累计的各类地块数量。"><span>一环内的河流和海岸</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="自然奇观由 NaturalWonderGenerator 先放置并打 impact，起点评价不直接读奇观数量。"><span>地图上的自然奇观数</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="离别的起点太近是 closeStartPenalty 的结果（否决并扣分），不是评价的主要输入；好的起点本身先要过三环门槛。"><span>邻近城市的距离惩罚</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="b"><fieldset><legend>3. StartNormalizer 会往起点周围加丘陵、绿洲或资源，为什么？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="它只按产量条件补，不关心美观；地貌好看与否不是这一步的判据。"><span>让起点地形更好看些</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="normalizeProduction 触发条件是 innerProduction/earlyProduction 太低；粮食档位按 totalFood 与两块原生粮格算；战略保底是“每文明至少一份”。目的都是不让开局运气决定成败。"><span>避免开局时差距过大</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="补多少取决于地形：条件不触发就不补，触发时按缺口档位补给，起点之间并不相同。"><span>让所有起点都一个样</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="补的资源数量有限且只在起点 1~3 环，不会显著改变全图总量；战略保底也只是每种最多再补 2 份。"><span>增加地图的资源总量</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="b"><fieldset><legend>4. 奢侈品在每个区域各分一种，主要是为了什么？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="分配规则看的是区域数与海岸条件，不看画面；美术效果只是副作用。"><span>让地图看起来更丰富</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="maxRegionsWithLuxury 让一种奢侈品只属少数区域（≤10 个区域时只属一个），于是各文明缺的物产不同，贸易与扩张才有交换价值。"><span>让各区域有独特物产</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="避免扎堆的是 impact 半径（奢侈品半径 3），那是落位阶段的约束，不是“每区域一种”的目的。"><span>让资源不集中在一点</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="奢侈品正是靠改良设施与连接进入经济的（第 17 课），分配时不会预设玩家不去采集。"><span>让玩家不用去采集它</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：按肥沃度来切分；2：三环内粮锤好坏格数；3：避免开局时差距过大；4：让各区域有独特物产。分别对应 <a href="#regions">区域切分</a>、<a href="#starts">出生点评价</a>、<a href="#normalize">起点修正</a>、<a href="#resources">奢侈品分配</a>。</p></details>
+<h3>练习 A · 推演区域切分（6 分钟）</h3><p>一块 totalFertility = 200 的区域要分成 3 份（先 1 后 2）。按 <code>divideRegion</code> 与 <code>splitRegion</code>：① 两次切分的目标肥沃度各是多少？② 第二刀是对哪一块切的，为什么不能保证两块都等于 100？③ 如果要切成 5 份，第一刀的比例是多少？</p><details class="rubric"><summary>展开核对要点</summary><p>① 第一刀：<code>firstDivisions = 3 / 2 = 1</code>，比例 <code>(100×1)/3 = 33%</code>，目标 <code>200×33/100 = 66</code>。剩下 2 份的区域内肥沃度约为 134，第二刀比例 50%，目标约 67。② 第二刀切的是剩余那块（不是第一刀切出的 66 那块）。因为切分点只能取整列/整行，累加肥沃度很难正好等于目标，代码只找“最接近”的一刀，所以三块大小只保证<strong>大致</strong>相当。③ 5 份时 <code>firstDivisions = 2</code>，比例 <code>(100×2)/5 = 40%</code>，即 2 份 + 3 份。</p></details>
+<h3>练习 B · 手算一个起点的分数（10 分钟）</h3><p>某内陆起点（不临海、不在别的起点附近），三环累计为：一环 粮 2、锤 4、优质 3、垃圾 0、临河 1；二环 粮 7、锤 4、优质 7、垃圾 1、临河 2；三环 粮 9、锤 6、优质 8、垃圾 3、临河 3。① 判断每一环是否过下限。② 算出三环各得多少分、总分多少。③ 如果它离另一个已选起点 5 环，<code>closeStartPenalty = 69</code>，总分会变成多少？</p><details class="rubric"><summary>展开核对要点</summary><p>① 一环：2≥1、4≥0、3≥3 通过；二环：7≥4、4≥0、7≥6 通过；三环：9≥4、6≥2、8≥8 通过（都是累计值）。② 一环：<code>firstRingFoodScores[2] + firstRingProdScores[4] + 1 + 3×2 − 0</code> = 14 + 20 + 1 + 6 = 41。二环：粮 <code>secondRingFoodScores[7] = 30</code>；有效锤 <code>4 &lt; 7×2</code> 折算为 <code>(7+1)/2 = 4</code>，查 <code>secondRingProdScores[4] = 30</code>；<code>30 + 30 + 2 + 7×2 − 1×3 = 73</code>。三环：<code>9 + 6 + 8 + 3 − 3×2 = 20</code>。总分 <code>41 + 73 + 20 = 134</code>。③ 先被否决（<code>isGoodStart = false</code>），分数再扣 69%：<code>134 − 134×69/100 = 134 − 92 = 42</code>。源码用整数除法，<code>(134×69)/100 = 92</code>，所以剩 42 分。</p></details>
+<h3>练习 C · 比较两类资源的分配目标（5 分钟）</h3><p>奢侈品与战略资源的分配逻辑完全不同。从“目标是按什么单位分、谁优先拿到、保证下限是什么”三方面各给一句对比，并说明各自的 impact 半径在防什么。</p><details class="rubric"><summary>展开核对要点</summary><p>奢侈品按<strong>区域</strong>分：每个区域先分到一种（≤10 区域时不共享），落图时大文明起点与城邦起点优先，保证起点附近至少 2 份；impact 半径 3，防同一区域奢侈品扎堆。战略资源按<strong>地形频率</strong>分：每 N 格一份、按权重随机选种，落图顺序是陆地大矿→城邦现代资源→陆地小矿→水域大矿，保底是“每种至少每文明一份、最多再补 2”；impact 半径 0，只排斥自己这格，允许成片出现。共同点：都用 impact 表示“已占”，都优先满足稀缺/硬约束，最后才为凑数量放宽扎堆限制。</p></details>
+<h3>练习 D · 本地核验（可选，5～10 分钟）</h3><p>在 Kotlin REPL 或测试里造一张带文明的地图（<code>MapGenerator.generateMap(mapParameters, gameParameters, gameInfo)</code>），确认：① 大文明数与区域数相等；② 每个大文明都有一个起点，且起点 1～2 环内有奢侈品；③ 统计全图资源格数与奢侈品/奖励/战略的种类数。再想一个问题：如果把 <code>baseMinorDepositFrequency</code> 从 30 改成 10，地图会怎样变化？</p><details class="rubric"><summary>展开核对要点</summary><p>本课程核对（Kotlin REPL，Small 六边图、seed 42、4 大文明 + 4 城邦）：① 地图 705 格、陆地 509，切成 4 块区域（146/84/128/128，类型 Hybrid/Plains/Hybrid/Grassland）；② 8 个文明全部拿到起点，4 个大文明起点 1～2 环内各有 3～4 份奢侈品；③ 全图 174 个资源格：14 种奢侈品、7 种奖励资源、6 种战略资源。改频率：<code>frequency</code> 变小 → <code>amountToPlace</code> 变大，小矿数量增加，但第一趟仍要避开 impact，会更快耗尽无障碍格并进入第二趟，表现为密度上升且更多资源挨在一起。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/MapRegions.kt">MapRegions.kt</a> 全文（区域切分与 startBias 分桶都在这里）；再读 <a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/RegionStartFinder.kt">RegionStartFinder.kt</a> 的 <code>evaluateTileForStart</code>（对着本课的两张表看）与 <a href="../../core/src/com/unciv/logic/map/mapgenerator/mapregions/StartNormalizer.kt">StartNormalizer.kt</a> 的粮食/生产力保底；最后读 <a href="../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/LuxuryResourcePlacementLogic.kt">LuxuryResourcePlacementLogic.kt</a> 与 <a href="../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/StrategicBonusResourcePlacementLogic.kt">StrategicBonusResourcePlacementLogic.kt</a> 两个入口，以及共用的 <a href="../../core/src/com/unciv/logic/map/mapgenerator/resourceplacement/MapRegionResources.kt">MapRegionResources.kt</a>。速查见 <a href="reference/hexmath.html#regions-resources">地图速查 · 区域与资源</a>。</p><p>下次学习前，用两分钟默写：区域切分的目标量、好起点的三环门槛、closeStartPenalty 的表、三类资源各自的“分单位”与保底；约一周后再做练习 A 和 B。如果记不清“为什么先分配奢侈品再落图”，回第 4 节看 <code>placeResourcesAndMinorCivs</code> 的调用顺序，别硬背结论。</p><p>有不清楚的分支，可以直接问教学助手。把你推演的区域切分或起点分数一起发来，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0009-elevation-rivers.html">上一课：山地与河流</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="0011-movement-pathing.html">下一课：移动代价与寻路</a></div></section>
+<footer>资料核对：2026-09-15。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明；区域与资源类源码在 <code>mapgenerator/mapregions/</code> 与 <code>mapgenerator/resourceplacement/</code>。REPL 实测（Small 六边图、seed 42、4 大文明 + 4 城邦）：705 格 / 509 陆地 / 4 块区域（146·84·128·128，Hybrid·Plains·Hybrid·Grassland）/ 174 个资源格（14 种奢侈品、7 种奖励、6 种战略）；区域常量与四张分数表逐格复算无误。</footer>
+</main></div>
+</body>
+</html>

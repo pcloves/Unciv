@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>07 · 地图生成流水线 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>07 / 地图生成流水线</strong><a href="#goal">目标、回顾与场景</a><a href="#entry">1. 开局按钮怎样请出地图生成器</a><a href="#stages">2. generateMap 的十几道工序</a><a href="#branches">3. 新游戏与编辑器：两处岔路</a><a href="#randomness">4. seed 能保证到哪一步</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第三、六课<br>含源码走读与推演练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第二阶段 / 地图专题 · 生成专题第一课</div>
+<h1>地图生成流水线</h1>
+<p class="lead">第六课给了你一个装地块的容器，这一课看一张真正的世界怎样被造出来：从开局按钮出发，MapGenerator 按什么顺序跑完十几道工序，新游戏和地图编辑器在哪里分岔，以及一个 seed 到底能保证什么、不能保证什么。读完你应当能按依赖排出生成阶段，说出两种分支的差别，并界定 seed 的可复现范围。</p>
+<p class="meta">需要的基础：第三课的规则集与 unique、第六课的 TileMap 与地块分层。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>先给三个场景。场景一：新游戏界面点“开始”，几秒后一张有大陆、河流、资源和出生点的地图出现。场景二：地图编辑器点“生成”，同一套管线跑一遍，但地图上不会摆出生点。场景三：主菜单背景里缓缓滚动的世界，也是这套管线悄悄生成的。三个入口，一套生成器。</p>
+<h3>先回顾第六课，两个口述问题</h3>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>阶段与顺序：</strong>一张地图要经过哪些工序？谁必须排在谁前面？</li><li><strong>两个分支：</strong>新游戏生成和编辑器生成，共用哪些阶段、各有哪些专属步骤？</li><li><strong>随机性边界：</strong>同一个 seed 重开会得到什么、不会得到什么？</li></ul><p>读完还要会一件事：不看正文，把打乱的地形阶段排回源码顺序，并解释两处依赖关系。</p></div><div><h3>口述两个关键结论</h3><ol><li>第六课的环绕补偿向量 <code>(r, −r)</code> 为什么能保持 <code>x+y</code> 不变？它改变了什么？</li><li>相邻两块地之间的公共边是条河，查询时读哪块地的哪个字段？（B 在 A 的右上）</li></ol><p>这两条是第六课“环绕”与“河流边存储”的核心，本课第 4 节谈 seed 时还会用到“同一条链、同一批数据”的想法。</p><p class="source"><a href="reference/hexmath.html">地图与坐标速查</a><a href="0006-tilemap.html">第六课：地块怎样组成地图</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>入口与调用者</td><td>10 分钟</td><td>说出三个调用者，及生成器的输入输出</td></tr><tr><td>阶段与依赖</td><td>16 分钟</td><td>按依赖排出阶段，解释两处先后约束</td></tr><tr><td>新游戏与编辑器分支</td><td>12 分钟</td><td>列出共用与专属步骤，说明编辑器分步</td></tr><tr><td>seed 的可复现范围</td><td>14 分钟</td><td>区分 seed 与 gameId 各自控制什么</td></tr></tbody></table>
+</section>
+
+<section id="entry"><h2>1. 开局按钮怎样请出地图生成器</h2>
+<p>新游戏的入口在 <code>GameStarter</code>。它的类注释直接给出了本课的随机性结论，接着的 init 块按顺序组装规则集、文明和地图。先看注释与地图相关的那一段：</p>
+<div class="paired"><div><pre><code><span class="comment">// GameStarter.kt 类注释（开头部分）：</span>
+<span class="comment">// 地图地形是确定的，但开局设置——包括出生点、资源和其他细节——是随机的，</span>
+<span class="comment">// 依据 GameContext.stateBasedRandom，而它基于每局完全随机的 gameId。</span>
+class GameStarter private constructor(
+    private val gameSetupInfo: GameSetupInfo
+) {
+    <span class="comment">// …companion 与字段省略…</span>
+    init {
+        <span class="comment">// 组规则集（第三课）；先备好地图生成器</span>
+        ruleset = RulesetCache.getComplexRuleset(gameInfo.gameParameters)
+        val mapGen = MapGenerator(ruleset)
+
+        <span class="comment">// 生成新地图（部分代码；载入已有地图的分支省略）</span>
+        } else runAndMeasure("generateMap") {
+            <span class="comment">// 生成器需要知道有哪些文明，才能生成区域、出生点和资源</span>
+            phaseOneChosenCivs = chooseCivilizations(existingMap = false)
+            addCivilizations(phaseOneChosenCivs)
+            tileMap = mapGen.generateMap(gameSetupInfo.mapParameters,
+                gameSetupInfo.gameParameters, gameInfo)
+            tileMap.mapParameters = gameSetupInfo.mapParameters
+            <span class="comment">// 先暂时忘掉它们！生成可能放不下某些城邦，稍后用旧方法兜底重放</span>
+            gameInfo.civilizations.clear()
+        }
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/GameStarter.kt">本地 GameStarter.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameStarter.kt#L29">类注释 · L29</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameStarter.kt#L82">generateMap 段 · L82</a></p></div><div><p>类注释先立结论：<strong>地形</strong>（terrain）是确定的，由种子决定；<strong>开局设置</strong>（出生点、资源等）随机，依据 <code>stateBasedRandom</code>，而这个随机又基于每局完全随机的 <code>gameId</code>。本课第 4 节会验证这段话的每一半。</p><p>init 里先按第三课的方法组出复杂规则集，再 <code>MapGenerator(ruleset)</code>。注意生成器的构造参数只有规则集（和可选的协程作用域）——它不保存地图、不保存种子，输入输出全部走方法。</p><p>生成地图之前，先 <code>chooseCivilizations</code> 选好文明并 <code>addCivilizations</code> 挂进 gameInfo——注释说明了原因：生成器要知道文明数量，才能算区域和出生点。生成完立刻 <code>clear</code>，因为生成时可能放不下某些城邦，稍后要用旧方法兜底重放。</p><p><code>generateMap</code> 收到三样东西：<code>mapParameters</code>（形状、大小、环绕、seed 与各强度参数）、<code>gameParameters</code>（文明数等整局设置）、<code>gameInfo</code>（整局状态）。最后两个参数带默认值，可以不给。</p></div></div>
+<p>同一个生成器为三个入口服务。区别只在于传不传 gameInfo、传不传协程作用域：</p>
+<table><thead><tr><th scope="col">调用方</th><th scope="col">场景</th><th scope="col">传 gameInfo 吗</th><th scope="col">传协程作用域吗</th></tr></thead><tbody><tr><td><a href="../../core/src/com/unciv/logic/GameStarter.kt">GameStarter</a></td><td>新开一局</td><td>传（已挂文明）</td><td>不传</td></tr><tr><td><a href="../../core/src/com/unciv/ui/screens/mapeditorscreen/tabs/MapEditorGenerateTab.kt">MapEditorGenerateTab</a></td><td>编辑器整图/分步生成</td><td>不传</td><td>不传</td></tr><tr><td><a href="../../core/src/com/unciv/ui/screens/mainmenuscreen/MainMenuScreen.kt">MainMenuScreen</a></td><td>主菜单背景图</td><td>不传</td><td>传（可中止）</td></tr></tbody></table>
+<p>主菜单背景在 <code>startBackgroundMapGeneration</code> 里造一张矩形 pangaea 图，把协程作用域传给生成器——第 2 节会看到它被 <code>runAndMeasure</code> 用来随时中止。传不传 gameInfo，正是第 3 节两条分支的分水岭。</p>
+</section>
+
+<section id="stages"><h2>2. generateMap 的十几道工序</h2>
+<p>打开 <code>MapGenerator.generateMap</code>。先看入口——它在真正开工前做了五步准备。代码里的 ①～⑤ 与右侧讲解一一对应：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerator.generateMap（入口部分代码）：开工前的五步准备。</span>
+fun generateMap(mapParameters: MapParameters,
+        gameParameters: GameParameters = GameParameters(),
+        gameInfo: GameInfo? = null): TileMap {
+    val mapSize = mapParameters.mapSize
+    val mapType = mapParameters.type
+
+    <span class="comment">// ① 处理种子：0 表示玩家没选，换成当前毫秒</span>
+    if (mapParameters.seed == 0L)
+        mapParameters.seed = System.currentTimeMillis()
+    <span class="comment">// ② 重置随机源：此后所有阶段共用同一个 Random</span>
+    randomness.seedRNG(mapParameters.seed)
+
+    <span class="comment">// ③ 按形状造底图（第六课的两个 TileMap 构造器）</span>
+    val map: TileMap = if (mapParameters.shape == MapShape.rectangular)
+        TileMap(mapSize.width, mapSize.height, ruleset, mapParameters.worldWrap)
+    else
+        TileMap(mapSize.radius, ruleset, mapParameters.worldWrap)
+
+    <span class="comment">// ④ 把参数挂回地图，并记录生成版本</span>
+    mapParameters.createdWithVersion = UncivGame.VERSION.toSerializeString()
+    map.mapParameters = mapParameters
+
+    <span class="comment">// ⑤ 提前出口：空地图整图改海洋，一个阶段都不跑</span>
+    if (mapType == MapType.empty) {
+        for (tile in map.values) {
+            tile.baseTerrain = Constants.ocean
+            tile.setTerrainTransients()
+        }
+        return map
+    }
+    <span class="comment">// …下面的阶段链见本节后半…</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L148">generateMap · L148</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/MapParameters.kt#L94">seed 默认值 · L94</a></p></div><div><p>① 处理 seed：默认值 0 表示“玩家没选种子”，换成当前毫秒数；非 0 就原样用。</p><p>② <code>seedRNG</code> 用这个 seed 重置生成器自带的随机源——从这一刻起，后面所有阶段的随机数都从同一个序列里取，这是“同 seed 同地图”的根基。</p><p>③ 按形状调用第六课的两个 TileMap 构造器。新造出来的地图全是同一种陆地，真正的海陆山川要由后面的阶段往上写。</p><p>④ 把 mapParameters 挂回 map（存档时需要完整参数），并记录 <code>createdWithVersion</code>——生成时的游戏版本，留着给旧存档的支持逻辑用。</p><p>⑤ 提前出口：<code>MapType.empty</code> 把整张图改成海洋直接返回，一个阶段都不跑。空地图是编辑器手工画图的起点。</p></div></div>
+<p>接下来是主阶段链。每个阶段包在 <code>runAndMeasure</code> 里，按固定顺序执行：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerator.generateMap（阶段链部分代码）：顺序即依赖。</span>
+runAndMeasure("MapLandmassGenerator") {
+    MapLandmassGenerator(map, ruleset, randomness).generateLand()
+}
+runAndMeasure("applyHumidityAndTemperature") {
+    applyHumidityAndTemperature(map)
+}
+runAndMeasure("raiseMountainsAndHills") {
+    MapElevationGenerator(map, ruleset, terrainConditions, randomness).raiseMountainsAndHills()
+}
+runAndMeasure("spawnLakesAndCoasts") {
+    spawnLakesAndCoasts(map)
+}
+runAndMeasure("spawnVegetation") {
+    spawnVegetation(map)
+}
+runAndMeasure("spawnRareFeatures") {
+    spawnRareFeatures(map)
+}
+runAndMeasure("spawnIce") {
+    spawnIce(map)
+}
+runAndMeasure("assignContinents") {
+    map.assignContinents(TileMap.AssignContinentsMode.Assign)
+}
+runAndMeasure("RiverGenerator") {
+    RiverGenerator(map, randomness, ruleset).spawnRivers()
+}
+convertTerrains(map.values)
+<span class="comment">// …分支（见第 3 节）…</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L175">阶段链 · L175</a></p></div><div><p>第 1、2 步决定骨架：先定陆海（哪格是水），再给每格写湿度与温度。第 3 步按陆海抬升出山脉丘陵，第 4 步把连片的水体划成湖、并给海洋镶上海岸，第 5～7 步才按温湿种植被、撒稀有特征、铺冰。地形全部定稿后，第 8 步给每块陆地编号大洲，第 9 步让河流沿边流淌。</p><p>第 10 步 <code>convertTerrains</code> 应用规则集里的 <code>ChangesTerrain</code> 类 unique——第三课的规则管线在这里把“某地形遇上邻居就变另一种地形”的声明落到具体格子上。序号对应下面那张阶段表。</p><p>同一段代码就是编辑器“分步生成”的步骤清单，第 3 节会回来对照。</p></div></div>
+<p><code>runAndMeasure</code> 有两个职责。平时它只是直接执行 action；打开 <code>consoleTimings</code> 调试开关才打印各阶段耗时；此外它在协程作用域已取消时直接跳过——主菜单背景图生成传了作用域，窗口重开时旧任务就被丢弃。</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerator.runAndMeasure（相关代码）：计时 + 中止检查。</span>
+private fun runAndMeasure(text: String, action: ()-&gt;Unit) {
+    if (coroutineScope?.isActive == false) return
+    if (!consoleTimings) return action()
+    val startNanos = System.nanoTime()
+    action()
+    val delta = System.nanoTime() - startNanos
+    debug("MapGenerator.%s took %s.%sms", text, delta/1000000L, (delta/10000L).rem(100))
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L319">runAndMeasure · L319</a></p></div><div><p>第一行是中止检查：作用域不再活跃就不执行该阶段。第二行是计时的开关，<code>consoleTimings = false</code> 时直接跑 action，一行开销都没有。</p><p>所以生成器平时完全不计时；只有调试开关打开时才测每个阶段的耗时。这个开关在 GameStarter 里也有一份同样的实现。</p></div></div>
+<p>把阶段链整理成表。每一行只记“干什么”和“依赖前面的什么”，细节在 08～10 课展开：</p>
+<table><thead><tr><th scope="col">顺序</th><th scope="col">阶段</th><th scope="col">干什么</th><th scope="col">依赖前面的什么</th></tr></thead><tbody>
+<tr><td class="number">1</td><td>陆海分布</td><td>决定哪些格是水</td><td>只需容器</td></tr>
+<tr><td class="number">2</td><td>湿度与温度</td><td>每格写 humidity / temperature</td><td>陆海（好选地形范围）</td></tr>
+<tr><td class="number">3</td><td>山地与丘陵</td><td>抬升出山脉丘陵</td><td>基础地形</td></tr>
+<tr><td class="number">4</td><td>湖泊与海岸</td><td>连片水体划湖，海洋镶边</td><td>海洋</td></tr>
+<tr><td class="number">5</td><td>植被</td><td>森林等按温湿种下</td><td>温湿 + 地形</td></tr>
+<tr><td class="number">6</td><td>稀有特征</td><td>少量稀有地形</td><td>地形 + 温湿</td></tr>
+<tr><td class="number">7</td><td>冰</td><td>高纬水面/陆地加冰</td><td>纬度温度</td></tr>
+<tr><td class="number">8</td><td>大洲编号</td><td>陆地洪泛编号</td><td>最终地形</td></tr>
+<tr><td class="number">9</td><td>河流</td><td>沿地块边画河</td><td>地形 + 高程</td></tr>
+<tr><td class="number">10</td><td>地形转换</td><td>应用 ChangesTerrain 规则</td><td>以上全部</td></tr>
+</tbody></table>
+<p>两处依赖值得展开。植被在温湿之后：<code>spawnVegetation</code> 按每格的 temperature/humidity 匹配规则范围，温湿没写就无从匹配。大洲编号排在地形定稿之后：<code>assignContinents</code> 用洪泛把连片的陆地归进同一个大陆，冰、转换等步骤会改地形，必须等它们全结束。另外 <code>applyHumidityAndTemperature</code> 内部调用过一次 <code>tileMap.setTransients(ruleset)</code>——第六课讲过这个方法的重入分支，尺寸校验注释里写“地图生成器会反复调用”，用的正是这里。</p>
+</section>
+
+<section id="branches"><h2>3. 新游戏与编辑器：同一条链，两处岔路</h2>
+<p>地形阶段跑完后，generateMap 按“这是不是编辑器”分岔。判定只看文明列表：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerator.generateMap（分支部分代码）：</span>
+<span class="comment">// 基于区域的生成——地图编辑器生成时不用</span>
+val civilizations = gameInfo?.civilizations
+val isMapEditor = civilizations?.isEmpty() ?: true
+if (! isMapEditor) {
+    map.gameInfo = gameInfo
+    val regions = MapRegions(ruleset)
+    runAndMeasure("generateRegions") {
+        regions.generateRegions(map, civilizations.count { ruleset.nations[it.civName]!!.isMajorCiv })
+    }
+    runAndMeasure("assignRegions") {
+        regions.assignRegions(map,
+            civilizations.filter { ruleset.nations[it.civName]!!.isMajorCiv }, gameParameters)
+    }
+    <span class="comment">// 奇观必须在多数资源之前——两者之间要求最小距离</span>
+    runAndMeasure("NaturalWonderGenerator") {
+        NaturalWonderGenerator(ruleset, randomness).spawnNaturalWonders(map)
+    }
+    runAndMeasure("placeResourcesAndMinorCivs") {
+        regions.placeResourcesAndMinorCivs(map,
+            civilizations.filter { ruleset.nations[it.civName]!!.isCityState })
+    }
+} else {
+    runAndMeasure("NaturalWonderGenerator") {
+        NaturalWonderGenerator(ruleset, randomness).spawnNaturalWonders(map)
+    }
+    <span class="comment">// 兜底的直铺资源——地图编辑器生成时用</span>
+    runAndMeasure("spreadResources") { spreadResources(map) }
+}
+runAndMeasure("spreadAncientRuins") { spreadAncientRuins(map) }
+
+if (isMapEditor)
+    mirror(map)
+
+<span class="comment">// 生成可能产生规则集不认可的地形/特征组合</span>
+for (tile in map.values)
+    TileNormalizer.normalizeToRuleset(tile, ruleset)
+
+return map</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L204">分支 · L204</a></p></div><div><p>判定只有一行：<code>gameInfo?.civilizations?.isEmpty() ?: true</code>。没传 gameInfo（编辑器、主菜单背景）或文明列表为空，就按编辑器处理。第一课讲过 GameStarter 生成前先把文明挂进 gameInfo，所以新游戏必然走进第一条岔路。</p><p>新游戏分支用 <code>MapRegions</code> 生成并分配区域（每家的出生地带），再放奇观、再放资源与城邦。奇观必须在多数资源之前的注释给出了依赖：两者之间要求最小距离，先放的要先占位置。这些是第 10 课“可玩的出生地与资源”的主场。</p><p>编辑器分支不跑区域，改用 <code>spreadResources</code> 把资源直接铺在符合条件的格子上。两条岔路汇合后一起铺古代遗迹；编辑器分支再多一步 <code>mirror</code>（镜像设置生效时才真正复制）。</p><p>最后的 <code>TileNormalizer.normalizeToRuleset</code> 是收尾防线：前十几个阶段可能拼出规则集不认可的地形/特征组合，这里逐格校正，保证产出永远符合规则集约定。</p></div></div>
+<p>编辑器还有一个“分步生成”入口：把阶段链拆成单步重跑。对应 <code>generateSingleStep</code> 和编辑器里的步骤枚举：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerator.generateSingleStep（部分代码）：只重跑一步。</span>
+fun generateSingleStep(map: TileMap, step: MapGeneratorSteps) {
+    if (map.mapParameters.seed == 0L)
+        map.mapParameters.seed = System.currentTimeMillis()
+
+    randomness.seedRNG(map.mapParameters.seed)
+
+    runAndMeasure("SingleStep $step") {
+        when (step) {
+            MapGeneratorSteps.None -&gt; Unit
+            MapGeneratorSteps.All -&gt; throw IllegalArgumentException(
+                "MapGeneratorSteps.All cannot be used in generateSingleStep")
+            MapGeneratorSteps.Landmass -&gt; MapLandmassGenerator(map, ruleset, randomness).generateLand()
+            MapGeneratorSteps.HumidityAndTemperature -&gt; applyHumidityAndTemperature(map)
+            MapGeneratorSteps.Elevation -&gt; MapElevationGenerator(map, ruleset,
+                terrainConditions, randomness).raiseMountainsAndHills()
+            <span class="comment">// …其余步骤同阶段链顺序…</span>
+            MapGeneratorSteps.Rivers -&gt; {
+                val resultingTiles = mutableSetOf&lt;Tile&gt;()
+                RiverGenerator(map, randomness, ruleset).spawnRivers(resultingTiles)
+                convertTerrains(resultingTiles)
+            }
+            MapGeneratorSteps.Resources -&gt; spreadResources(map)
+            MapGeneratorSteps.AncientRuins -&gt; spreadAncientRuins(map)
+        }
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L288">generateSingleStep · L288</a><a href="../../core/src/com/unciv/ui/screens/mapeditorscreen/MapGeneratorSteps.kt">MapGeneratorSteps</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/mapeditorscreen/MapGeneratorSteps.kt#L32">步骤枚举 · L32</a></p></div><div><p>入口同样先处理 seed 并重置随机源，然后只执行 <code>when</code> 选中的一步。整个生成链被包装成 <code>MapGeneratorSteps</code> 枚举，每一项带一个界面标签，编辑器把它显示成选项列表。</p><p><code>All</code> 会抛异常：整图生成必须走 generateMap，不能走单步。其余步骤与阶段链顺序一致；河流步多收集一个结果集合，只对动过的地块做地形转换。</p><p>编辑器的 <code>MapEditorGenerateTab</code> 把单步放在后台任务里跑（避免界面无响应），并把各步骤的参数先复制到地图参数中——陆海步还会先造一张空地图再跑，避免把丘陵刷到水上。</p></div></div>
+<p>两处岔路的完整对比：</p>
+<table><thead><tr><th scope="col">步骤</th><th scope="col">新游戏</th><th scope="col">地图编辑器</th></tr></thead><tbody>
+<tr><td>陆海 → 地形转换（前 10 步）</td><td>跑</td><td>跑</td></tr>
+<tr><td>区域生成与分配</td><td>跑（按文明数）</td><td>不跑</td></tr>
+<tr><td>自然奇观</td><td>跑</td><td>跑</td></tr>
+<tr><td>资源</td><td>区域放置（含城邦）</td><td>spreadResources 直铺</td></tr>
+<tr><td>古代遗迹</td><td>跑</td><td>跑</td></tr>
+<tr><td>镜像</td><td>不跑</td><td>跑（镜像设置为 none 时内部直接返回）</td></tr>
+<tr><td>TileNormalizer 校正</td><td>跑</td><td>跑</td></tr>
+</tbody></table>
+<aside class="callout"><strong>Godot 对照：生成数据与摆节点分开</strong><p>Unciv 的生成器不碰界面：输入是参数对象，输出是改好的 TileMap，三个入口共用。移植时可以保留这种“阶段函数”形态——每步是 <code>(地图, 规则集, 随机源) → 改地图</code>，编辑器就能复用同一批步骤做预览。在 Godot 里，生成阶段只写数据；Tiles / 节点等画面表现等数据定稿后再建，避免每改一步就重建一遍场景树。分步重跑还提醒我们：每一步的输入要明确，否则“重跑第 5 步”可能因为第 4 步已变而产生不同结果。</p></aside>
+</section>
+
+<section id="randomness"><h2>4. seed 能保证到哪一步</h2>
+<p>第 2 节说“同 seed 同地图”。这句话有边界，边界就藏在随机源的归属里。生成器自带一个随机源：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerationRandomness.kt（开头部分）：生成器的随机源。</span>
+class MapGenerationRandomness {
+    var RNG = Random(42)
+
+    fun seedRNG(seed: Long = 42) {
+        RNG = Random(seed)
+    }
+
+    <span class="comment">// getPerlinNoise / getNoise / chooseSpreadOutLocations（见下）</span>
+
+<span class="comment">// getPerlinNoise 的注释（节选）：</span>
+<span class="comment">// 生成一个叠加多个倍频的柏林噪声通道；</span>
+<span class="comment">// seed 参数名不准确：它其实是噪声云被“切”的位置（z 值）。</span>
+fun getPerlinNoise(tile: Tile, seed: Double, nOctaves: Int = 6, …): Double</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerationRandomness.kt">本地 MapGenerationRandomness.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerationRandomness.kt#L14">RNG 与 seedRNG · L14</a></p></div><div><p><code>RNG</code> 是普通字段，默认 <code>Random(42)</code>；<code>seedRNG</code> 换成指定种子。generateMap 入口调过一次 seedRNG，此后所有阶段共用这同一个 <code>Random</code> 实例。</p><p>注意噪声的 <code>seed</code> 参数不是地图种子：它是“从这条噪声云里切哪一层”的 z 位置。各阶段在开工时先从 RNG 里抽一个数当本阶段的 z（例如湿度、温度各抽一次），所以整张地图的噪声场最终仍由地图种子唯一决定。</p><p><code>chooseSpreadOutLocations</code> 也在这里：资源摆放“拉开距离选点”用它，同样从 RNG 取随机数。至此，阶段链上每一处随机都汇到同一个源头。</p></div></div>
+<p>环绕地图还有一个特殊处理：普通 2D 噪声在左右边界有接缝，生成器把平面卷成圆柱来消除：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerationRandomness.getNoise（环绕分支，部分代码）：</span>
+val worldCoords = HexMath.hex2WorldCoords(tile.position)
+val params = tile.tileMap.mapParameters
+
+<span class="comment">// 不环绕的地图用标准 2D 噪声，边缘自然有接缝</span>
+if (!params.worldWrap)
+    return noiseFunction(worldCoords.x.toDouble(), worldCoords.y.toDouble(), seed, …)
+
+<span class="comment">// 把 2D 平面卷成 3D 圆柱：左边缘(0°)与右边缘(360°)</span>
+<span class="comment">// 在 3D 噪声空间占据同一坐标，过渡在数学上完美无缝</span>
+val radius = if (params.shape == MapShape.rectangular) {
+    val width = params.mapSize.width
+    val adjustedWidth = if (width % 2 != 0) width - 1 else width
+    adjustedWidth / 2.0
+} else params.mapSize.radius.toDouble()
+val wrapPeriod = 3.0 * radius
+val angle = (worldCoords.x / wrapPeriod) * 2 * PI
+val cylinderRadius = wrapPeriod / (2 * PI)
+<span class="comment">// …offsets 由阶段 seed 算出（省略）…</span>
+val nx = cylinderRadius * cos(angle) + offsetX
+val ny = cylinderRadius * sin(angle) + offsetY
+val nz = worldCoords.y.toDouble() + offsetZ
+return noiseFunction(nx, ny, nz, …)</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerationRandomness.kt">本地 MapGenerationRandomness.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerationRandomness.kt#L51">getNoise · L51</a></p></div><div><p>不环绕时直接把地块的世界坐标喂给噪声，左右两端没有关联，会各长各的。第六课的环绕世界要求左右边界无缝衔接，地形也不例外——玩家走到最右再往右，看到的应该是连续的陆地，而不是一条颜色断层。</p><p>环绕时把水平坐标映射成圆柱表面的角度：x 平移一个 <code>wrapPeriod</code> 就走完一整圈，所以左边缘与右边缘落在 3D 噪声空间的同一个点上。竖直坐标直接当圆柱高度。噪声细节（倍频、振幅）是第 08 课的内容，这里只确认一点：三个 offset 也是由本阶段的 seed 算出的常数，仍在地图种子的控制范围内。</p></div></div>
+<p>现在看另一半随机：开局设置。GameStarter 的类注释说它们基于 gameId。证据在 GameContext：</p>
+<div class="paired"><div><pre><code><span class="comment">// GameContext.kt（相关代码）：基于状态的随机。</span>
+@Readonly
+fun stateBasedRandom(caller: String, seed: Int=31) =
+    Random(hashOf(caller.hashCode(), seed, this.hashCode()))
+
+<span class="comment">// GameContext.hashCode（部分代码）：游戏标识被混进哈希。</span>
+val hash = hashOf(
+    gameInfo?.turns?.hashCode() ?: 0,
+    (gameInfo?.gameId?.hashCode()
+        ?: gameInfo?.tileMap?.mapParameters?.seed?.hashCode() ?: 0),
+    <span class="comment">// …其余参与者省略…</span>
+)
+
+<span class="comment">// GameStarter.kt：开局随机源在构造时固定。</span>
+private val rng = GameContext(gameInfo = gameInfo).stateBasedRandom("GameStarter")
+
+<span class="comment">// GameInfo.kt：gameId 每局随机生成。</span>
+var gameId = randomGameId()   <span class="comment">// = pseudoRandomUuid(SecureRandom())</span></code></pre><p class="source"><a href="../../core/src/com/unciv/models/ruleset/unique/GameContext.kt">本地 GameContext.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/ruleset/unique/GameContext.kt#L89">stateBasedRandom · L89</a><a href="../../core/src/com/unciv/logic/GameStarter.kt">GameStarter.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameStarter.kt#L47">rng · L47</a><a href="../../core/src/com/unciv/logic/GameInfo.kt">GameInfo.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L117">gameId · L117</a></p></div><div><p><code>stateBasedRandom</code> 用一个哈希造随机源：调用方名字、固定 seed 和整个 <code>GameContext</code> 的状态。哈希的第二项是 gameId——每局用 <code>SecureRandom</code> 生成的 UUID，所以不同的局，即使地图参数完全相同，这里造出的随机序列也不同。</p><p>GameStarter 的 <code>rng</code> 在构造时固定下来，用来选出生点、起始单位等开局设置。也就是说：<strong>地形跟着 seed 走，出生点跟着 gameId 走</strong>。</p><p>哈希里还有一个兜底：没有 gameInfo 时，这一项退到 mapParameters.seed——测试直接调 generateMap 不传 gameInfo，随机就回到种子上，测试因此稳定。</p></div></div>
+<p>把可复现范围整理成三条：</p>
+<ol><li><strong>同 seed 必同：</strong>generateMap 里所有用 <code>randomness.RNG</code> 的阶段——陆海、温湿、山脉、植被、冰、河流、编辑器资源铺放，以及镜像。地形整体可复现。</li><li><strong>同 seed 不同：</strong>GameStarter 里用 <code>stateBasedRandom</code> 的开局设置——出生点等，它们随 gameId 每局不同。第 1 节的类注释说的正是这条边界。</li><li><strong>小心两处例外：</strong>seed 为 0 时被换成当前毫秒（玩家没选种子）；编辑器分步生成每次从 seed 重置随机源，但重跑一步的结果还取决于地图当前状态，不一定与整图生成时一致。</li></ol>
+<aside class="callout tradeoff"><strong>取舍：为什么拆成两套随机</strong><p>地图 seed 可复现，玩家才能分享“一张好图的种子”，编辑器也能稳定重跑阶段、开发者能复现 bug。开局设置跟着 gameId 走，同一张种子重开两局，地形一样而各家出生点不同——每局仍有新鲜感，也不让“记住种子”等价于“记住整局”。代价是：一张图对应多局时，出生点无法仅由种子重算。这正应了第 4 课的说法：测试不传 gameInfo，就是为了让断言落在种子可控的那一半上。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>MapGenerator 是无状态工具：实例只留规则集与协程作用域，输入输出全走 generateMap / generateSingleStep。</strong></li><li><strong>三个入口共用一条链：新游戏传 gameInfo，编辑器与主菜单背景不传；传不传决定第 3 节的分支。</strong></li><li><strong>阶段顺序即依赖：先陆海与温湿，再高程、湖岸、植被、冰，地形定稿后编号大洲、放河流、转换，最后收尾校正。</strong></li><li><strong>新游戏分支跑区域与区域资源；编辑器分支直铺资源并多一步镜像；两者最后都过 TileNormalizer。</strong></li><li><strong>generateMap 入口 seedRNG(seed)：全部地形阶段共用同一个 Random，同 seed 同地形。</strong></li><li><strong>出生点等开局设置走 stateBasedRandom，哈希混入 gameId：同 seed 重开，地形一样、出生点不同。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；不看正文排出阶段顺序、讲清 seed 边界，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. generateMap 进来后，第一件跟 seed 有关的事是什么？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="只有 seed==0L 才换成时间，这是“玩家没选种子”的兜底，不是每个种子都换。"><span>种子为零则换当前毫秒</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="入口调用 randomness.seedRNG(mapParameters.seed)，此后所有阶段共用这个 Random，同 seed 同地形。"><span>用种子重置随机发生器</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="种子本来就在 mapParameters.seed 里，入口不在这里存；它做的是拿种子重置 RNG。"><span>把种子存进地图参数里</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="入口先造 TileMap 底图（全是陆地），海洋要等陆海分布阶段才写。"><span>用种子生成首块海洋地</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>2. 新游戏与编辑器两条分支由什么决定？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="isMapEditor = gameInfo?.civilizations?.isEmpty() ?: true；新游戏生成前先把文明挂进 gameInfo。"><span>看文明列表是否为空</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="两分支都要 mapParameters（形状、大小、seed 等），它不是分水岭。"><span>看地图参数是否为空</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="worldWrap 影响 TileMap 构造和噪声形状，两条分支都支持。"><span>看世界环绕是否开启</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="MapType.empty 是入口的提前返回（全海洋），不是这里的两个分支。"><span>看地形类型是否为空</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>3. 同一个 map seed 重开两局，哪一项会不一样？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="出生点由 GameStarter 的 rng 选，stateBasedRandom 的哈希混入每局随机的 gameId；类注释明说开局设置随机。"><span>文明出生点位置</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="海岸扩张在 spawnLakesAndCoasts 里，只用 randomness.RNG，同 seed 相同。"><span>海岸线扩张宽度</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="山脉抬升在 MapElevationGenerator 里，只用 randomness.RNG，同 seed 相同。"><span>山脉抬升的位置</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="河流由 RiverGenerator 生成，只用 randomness.RNG，同 seed 相同。"><span>河流流动的路径</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. 哪一步只在地图编辑器的生成路径里执行？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="mirror(map) 在 isMapEditor 分支；镜像类型为 none 时函数内部直接返回，主菜单背景也不镜像。"><span>按对称轴镜像地图</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="湿度温度是第 2 步公共阶段，两条分支之前就完成。"><span>给地块写湿度温度</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="assignContinents 是第 8 步公共阶段，两条分支之前就完成。"><span>给地块分配大洲号</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="基础地形由公共阶段链写入，两条分支共用。"><span>给地块写基础地形</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：用种子重置随机发生器；2：看文明列表是否为空；3：文明出生点位置；4：按对称轴镜像地图。分别对应 <a href="#stages">入口准备</a>、<a href="#branches">分支判定</a>、<a href="#randomness">seed 边界</a>、<a href="#branches">编辑器专属步骤</a>。</p></details>
+<h3>练习 A · 把阶段排回源码顺序（7 分钟）</h3><p>不看第 2 节：把 Rivers、HumidityAndTemperature、Landmass、Vegetation、Elevation、Ice、assignContinents 排成 generateMap 里的执行顺序，并解释两处先后约束：植被为什么在温湿之后？大洲编号为什么在地形定稿之后？</p><details class="rubric"><summary>展开核对要点</summary><p>顺序：Landmass → HumidityAndTemperature → Elevation →（LakesAndCoasts、RareFeatures 按需补入）→ Vegetation → Ice → assignContinents → Rivers。约束一：spawnVegetation 按每格 temperature/humidity 匹配规则范围，温湿未写就无从匹配。约束二：assignContinents 洪泛编号的对象是最终陆海地形，冰与地形转换都会改地形，必须排在其后。排序后对照第 2 节表格自检。</p></details>
+<h3>练习 B · 补全分支对比（5 分钟）</h3><p>不看第 3 节的表：区域生成与分配、自然奇观、spreadResources、镜像、古代遗迹、TileNormalizer 六项，分别在哪条分支执行（新游戏 / 编辑器 / 两者都跑）？</p><details class="rubric"><summary>展开核对要点</summary><p>区域生成与分配：仅新游戏；自然奇观：两者都跑（新游戏分支要求它排在多数资源之前）；spreadResources：仅编辑器；镜像：仅编辑器（镜像设置 none 时内部直接返回）；古代遗迹：两者都跑；TileNormalizer：两者都跑（收尾校正）。</p></details>
+<h3>练习 C · 推演 seed 边界（6 分钟）</h3><p>同一套地图参数（含相同 seed）开两局：① 两张地图的地形一样吗？② 两家文明的出生点一样吗？各用什么代码证据支持你的答案？</p><details class="rubric"><summary>展开核对要点</summary><p>① 一样。generateMap 入口 seedRNG(seed)，地形阶段全部共用 randomness.RNG，噪声的 z 值也从它抽取；地形整体是种子的纯函数。② 不一样。出生点由 GameStarter 的 rng 选取，rng = GameContext(gameInfo).stateBasedRandom("GameStarter")，其哈希混入 gameId（每局用 SecureRandom 生成），所以同 seed 不同局出生点不同。证据：GameStarter 类注释（L29）、GameContext.stateBasedRandom（L89）与 hashCode 第二项（L136）、GameInfo.gameId（L117）。</p></details>
+<h3>练习 D · 本地核验（可选，5～10 分钟）</h3><p>跑 <code>:tests:test --tests "com.unciv.logic.map.MapGenerationTests"</code>。注意测试直接 new MapParameters() 并设 seed=1 或 1..20，且不传 gameInfo——它会走哪条分支？这怎样保证测试稳定？</p><details class="rubric"><summary>展开核对要点</summary><p>不传 gameInfo → civilizations 为 null → isMapEditor = true，走编辑器分支（无区域、无出生点）。稳定来源：地形阶段只用 mapParameters.seed；stateBasedRandom 的哈希在没有 gameInfo 时退到 mapParameters.seed（GameContext.hashCode 第二项的兜底），所以遗迹等步骤也回到种子上。测试应 4 过 0 失败（本课程核对时 Gradle MCP 实测）。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">MapGenerator.kt</a> 全文（重点在类注释、generateMap 入口与阶段链、分支、generateSingleStep、runAndMeasure），再读 <a href="../../core/src/com/unciv/logic/GameStarter.kt">GameStarter.kt</a> 的类注释与 init 地图段，最后对照 <a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerationRandomness.kt">MapGenerationRandomness.kt</a> 和 <a href="../../tests/src/com/unciv/logic/map/MapGenerationTests.kt">MapGenerationTests.kt</a>。速查见 <a href="reference/hexmath.html">地图与坐标速查</a>；地图生成的噪声与分布细节随第 08 课补充。</p><p>下次学习前，用两分钟默写：阶段链顺序、两条分支的专属步骤、seed 与 gameId 各自控制什么；约一周后再做练习 A 和 C。如果记不清“出生点为什么不吃 seed”，回第 4 节看 stateBasedRandom 的哈希第二项，别直接背结论。</p><p>有不清楚的步骤，可以直接问教学助手。说说你排错了哪个阶段、哪里对不上，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0006-tilemap.html">上一课：地块怎样组成地图</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="0008-landmass-climate.html">下一课：陆海与气候分布</a></div></section>
+<footer>资料核对：2026-09-11。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。</footer>
+</main></div>
+</body>
+</html>

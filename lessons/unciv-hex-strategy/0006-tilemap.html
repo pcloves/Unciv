@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>06 · 地块怎样组成地图 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>06 / 地块怎样组成地图</strong><a href="#goal">目标、回顾与场景</a><a href="#storage">1. 同一批地块，两份存储</a><a href="#layers">2. 一块地的分层数据</a><a href="#neighbors">3. 邻居缓存与初始化顺序</a><a href="#wrap">4. 左右两端怎样接起来</a><a href="#shapes">5. 两种形状与测试防线</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第五课<br>含源码走读与手算练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第二阶段 / 地图专题</div>
+<h1>地块怎样组成地图</h1>
+<p class="lead">第五课解决了“一块地在哪”，这一课解决“地图本身是什么”：几千块地怎样装进内存，一块地内部的数据怎么分层，邻居查询为什么快，以及开了环绕的世界怎样在东西两端接起来。读完后你应当能解释 tileList 与 tileMatrix 的分工，手算小地图的矩阵布局，并推演环绕边界上的邻居。</p>
+<p class="meta">需要的基础：第二课的序列化与 @Transient 重建、第五课的 HexCoord 与经纬度。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>先给两个场景。场景一：新开一局游戏，地图生成器造出几千块地，之后单位每次移动都要问“隔壁是哪块地、能不能进”——问得这么频繁，总不能每次都扫一遍列表。场景二：你开了一局环绕世界（world wrap）地图，单位走到最右一格再往右，应该出现在最左一列；系统还得能算出“这两块地其实是邻居”。这两个场景分别对应本课的两大主角：<strong>存储布局</strong>（tileList 与 tileMatrix）与<strong>环绕补偿</strong>（经度方向平移一整个地图宽度）。</p>
+<h3>先找回第五课的两件工具</h3>
+<div class="paired"><div><h3>本课的四个问题</h3><ul><li><strong>存两份为什么：</strong>tileList 与 tileMatrix 各司什么职？谁写进存档？</li><li><strong>一块地有什么：</strong>地形、特征、奇观、资源、改良怎样分层，河流存在哪？</li><li><strong>邻居为什么快：</strong>neighbors 的惰性缓存和 setTransients 的两个循环有什么关系？</li><li><strong>环绕怎么做：</strong>右边界外一格要补偿什么坐标？为什么必须同时改变 x、y？</li></ul><p>读完还要会一件事：不看资料，<strong>手算</strong>半径 2 六边形地图的矩阵布局，并推演环绕地图上边界邻居的坐标。</p></div><div><h3>两个关键概念</h3><ul><li><strong>坐标与画面位置：</strong><code>x+y</code> 决定上下位置，<code>y−x</code> 决定左右位置。第 4 节用这两个量说明环绕换算。</li><li><strong>序列化与瞬态：</strong>第二课的分类——tileList 属于对局状态（写进存档）；tileMatrix 属于运行时缓存（@Transient，读档后由 setTransients 重建）。</li></ul><p class="source"><a href="reference/hexmath.html">地图与坐标速查</a><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>两份存储与矩阵重建</td><td>14 分钟</td><td>说出 tileList/tileMatrix 分工，手算小地图矩阵</td></tr><tr><td>地块分层</td><td>10 分钟</td><td>按层列出地块数据，说出河流存哪里</td></tr><tr><td>邻居缓存与顺序</td><td>10 分钟</td><td>解释惰性缓存与两遍循环的原因</td></tr><tr><td>环绕与测试</td><td>16 分钟</td><td>推演补偿坐标，说出分布测试的用途</td></tr></tbody></table>
+</section>
+
+<section id="storage"><h2>1. 同一批地块，两份存储</h2>
+<p>打开 <code>TileMap</code> 类，先看字段区。同一批地块被存了两份：一份是对象列表，一份是按坐标排的二维数组：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap.kt 开头（相关字段）：同一批地块，存了两份。</span>
+class TileMap(initialCapacity: Int = 10) : IsPartOfGameInfoSerialization {
+    <span class="comment">// 参与序列化的字段</span>
+    var mapParameters = MapParameters()          <span class="comment">// 形状、大小、环绕、种子等参数</span>
+    var tileList = ArrayList&lt;Tile&gt;(initialCapacity) <span class="comment">// 全部地块，写进存档</span>
+
+    <span class="comment">// @Transient 字段：不写存档，读档后重建</span>
+    @Transient
+    var tileMatrix = ArrayList&lt;ArrayList&lt;Tile?&gt;&gt;()
+        <span class="comment">// 原注释：比 hashmap 快好几倍，差距惊人</span>
+    @Transient var leftX = 0
+    @Transient var bottomY = 0
+    @Transient var width = 0
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L34">TileMap · L34</a></p></div><div><p><code>tileList</code> 是权威列表：所有地块对象都在里面，随对局写进存档。遍历地图（“所有地块都怎样怎样”）直接走它。</p><p><code>tileMatrix</code> 是它的“按坐标索引的视图”：同样一批对象，按坐标摆进二维数组，查一块地用 O(1) 数组下标而不是哈希查找。字段的英文注释直接给了理由——比 hashmap 快好几倍。因为矩阵下标从 0 开始，而坐标可以是负数，所以另存 <code>leftX</code>、<code>bottomY</code> 两个偏移（坐标最小值），查表时做平移。</p></div></div>
+<p>这个矩阵不是一建好就永远在的：它是 @Transient 字段，每次读档都要从 tileList 重建。重建代码在 setTransients：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap.setTransients（部分代码）：从 tileList 重建矩阵。</span>
+if (tileMatrix.isEmpty()) {
+    val topY = tileList.maxOf { it.position.y }
+    bottomY = tileList.minOf { it.position.y }
+    val rightX = tileList.maxOf { it.position.x }
+    leftX = tileList.minOf { it.position.x }
+
+    <span class="comment">// 先用算好的尺寸分配容量，避免反复扩容拷贝</span>
+    tileMatrix.ensureCapacity(rightX - leftX + 1)
+    repeat (rightX - leftX + 1) {
+        val row = ArrayList&lt;Tile?&gt;(topY - bottomY + 1)
+        repeat(topY - bottomY + 1) { row.add(null) }
+        tileMatrix.add(row)
+    }
+} else {
+    <span class="comment">// 地图生成器会反复调用；检查旧矩阵尺寸与坐标范围相符</span>
+    check(tileMatrix.size in (- 2 * leftX)..(3 - 2 * leftX)) {
+        "TileMap.setTransients called on existing tileMatrix of different size"
+    }
+}
+for (tileInfo in values) {
+    tileMatrix[tileInfo.position.x - leftX][tileInfo.position.y - bottomY] = tileInfo
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L584">setTransients · L584</a></p></div><div><p>第一步扫一遍 tileList，求出坐标的包围盒：x 从 leftX 到 rightX，y 从 bottomY 到 topY。第二步按包围盒大小建矩阵，先用 <code>ensureCapacity</code> 分配好容量，避免 ArrayList 扩容时反复拷贝数组。</p><p>第三步把每块地按 <code>(x − leftX, y − bottomY)</code> 放回矩阵。注意矩阵元素类型是 <code>Tile?</code>：六边形地图放进这个矩形包围盒后，四个角落是空的（地图外），那些位置保持 null。所以矩阵是“坐标盒子”，不是“地图形状”——地图形状由哪些位置非 null 决定。</p></div></div>
+<p>查一块地就一句数组下标。有两个入口，一个假设坐标有效，一个允许查空：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap：按坐标查地块（相关代码）。</span>
+@Readonly operator fun get(x: Int, y: Int) =
+    tileMatrix[x - leftX][y - bottomY]!!    <span class="comment">// 坐标必须有效</span>
+
+@Readonly
+fun getOrNull(x: Int, y: Int): Tile? =
+    tileMatrix.getOrNull(x - leftX)?.getOrNull(y - bottomY)
+    <span class="comment">// 越界或矩阵空洞都返回 null</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L222">get · L222</a></p></div><div><p><code>get</code> 末尾的 <code>!!</code> 把 null 变成异常：调用方传越界坐标或查到地图空洞，直接抛空指针。它用在“坐标必然有效”的热路径上，不付检查开销。</p><p><code>getOrNull</code> 温和：越界返回 null，落在矩阵空洞上也返回 null。第 4 节的环绕探测就是先拿它问“这里有没有地”，没有才考虑绕圈补偿。注意 getOrNull 本身不做环绕——注释里写明，要环绕用 getIfTileExistsOrNull。</p></div></div>
+<p>拿半径 2 的六边形地图手算一下。tileList 有 1 + 6×2×3/2 = 19 块地；矩阵是 5×5 的盒子，6 个角落是 null：</p>
+<pre class="diagram"><code>矩阵 [x−leftX][y−bottomY]，leftX=−2，bottomY=−2；每格写该处的 HexCoord
+           x=−2     x=−1     x=0      x=1      x=2
+   y= 2      ·        ·      (0,2)    (1,2)    (2,2)
+   y= 1      ·      (−1,1)   (0,1)    (1,1)    (2,1)
+   y= 0    (−2,0)   (−1,0)   (0,0)    (1,0)    (2,0)
+   y=−1    (−2,−1)  (−1,−1)  (0,−1)   (1,−1)    ·
+   y=−2    (−2,−2)  (−1,−2)  (0,−2)    ·        ·</code></pre>
+<p>为什么 6 个角落空着？半径 2 的六边形只包含到中心距离 ≤ 2 的格子：对角方向的两个坐标差异号时距离是 |x|+|y|，所以 (−2,2) 距离 4，出界；同号时距离是 max(|x|,|y|)，所以 (2,2) 距离 2，在界内。矩阵的行列数都是 2×半径+1，格子数却只随半径二次增长——盒子比六边形多出的角落就是那些 null。这也是为什么 getOrNull 必须区分“越界”和“空洞”。</p>
+</section>
+
+<section id="layers"><h2>2. 一块地的分层数据</h2>
+<p>现在打开 <code>Tile</code> 类看一块地存了什么。字段很多，但按“层”分组后很好记：</p>
+<div class="paired"><div><pre><code><span class="comment">// Tile.kt：一块地的存档字段，按层分组（部分代码）。</span>
+var position = HexCoord()                    <span class="comment">// 第五课：地块在哪</span>
+lateinit var baseTerrain: String             <span class="comment">// 基础地形：Grassland、Ocean……</span>
+var terrainFeatures: List&lt;String&gt; = listOf() <span class="comment">// 叠加特征：Forest、Hill……</span>
+var naturalWonder: String? = null            <span class="comment">// 奇观：整块覆盖外观与产出</span>
+var resource: String? = null                 <span class="comment">// 资源：Horses、Iron……</span>
+var resourceAmount: Int = 0                  <span class="comment">// 战略资源储量</span>
+var improvement: String? = null              <span class="comment">// 改良设施：Farm、Mine……</span>
+var improvementIsPillaged = false            <span class="comment">// 改良是否被劫掠</span>
+var roadStatus = RoadStatus.None             <span class="comment">// 道路/铁路是独立一层</span>
+var roadIsPillaged = false
+var hasBottomRightRiver = false              <span class="comment">// 河在“边”上：三个布尔</span>
+var hasBottomRiver = false
+var hasBottomLeftRiver = false</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L48">Tile 字段 · L48</a></p></div><div><p>第一层是<strong>坐标</strong>：position，第二课讲过城市存坐标不复制地块，地块自己当然要存。</p><p>第二层是<strong>地形</strong>：baseTerrain 是必有的一项（草地、平原、海洋……），terrainFeatures 是叠在上面的特征列表（森林、丘陵、绿洲……），一层基础加多层特征，所以它是 List 而不是单个字段。</p><p>第三层是<strong>奇观</strong>：naturalWonder 极少数地块才有，出现时整块地的外观与产出都按奇观算。第四层是<strong>资源与改良</strong>：resource 是地块固有的可收获物，improvement 是玩家建的设施，各占一个槽位。第五层是<strong>道路</strong>，与改良分开——因为道路有所有权（谁修的）。</p><p>最后三个布尔是<strong>河流</strong>：注意河不是格子的属性，是<strong>边</strong>的属性。一条河在两边格子之间，Unciv 把“这块地的正下方、右下、左下三条边有没有河”记在这块地上；每格各记三条“下边”，每条边就恰好被登记一次。河流怎么生成是第 09 课的内容，这里先记住它的存储形状。</p></div></div>
+<p>所有字段里存的都是<strong>名字</strong>（字符串），不是规则对象——这是第二、三课的组合拳：存档写名字，读档时按 ruleset 查出对象：</p>
+<div class="paired"><div><pre><code><span class="comment">// Tile.setTerrainTransients（部分代码）：名字 → 规则对象。</span>
+fun setTerrainTransients() {
+    if (!ruleset.terrains.containsKey(baseTerrain))
+        throw Exception("Terrain $baseTerrain does not exist in ruleset!")
+    baseTerrainObject = ruleset.terrains[baseTerrain]!!
+    setTerrainFeatures(terrainFeatures)
+    isWater = getBaseTerrain().type == TerrainType.Water
+    isLand = getBaseTerrain().type == TerrainType.Land
+    isOcean = getBaseTerrain().isOcean
+}
+
+<span class="comment">// setTerrainFeatures 里组装的“地形栈”（部分代码）。</span>
+allTerrains = sequence {
+    yield(baseTerrainObject)                 <span class="comment">// 最底：基础地形</span>
+    if (naturalWonder != null) yield(getNaturalWonder())
+    yieldAll(terrainFeatureObjects)          <span class="comment">// 最上：地形特征</span>
+}.toList().asSequence()</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L856">setTerrainTransients · L856</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L958">setTerrainFeatures · L958</a></p></div><div><p>第三课讲过 Ruleset 把名字映射成对象，这里就是落点：<code>ruleset.terrains[baseTerrain]</code> 查出基础地形对象缓存起来。如果存档里的地形名在规则集里不存在（模组被移除、旧档），直接抛异常——这是数据完整性的第一道防线。</p><p>缓存的不止对象，还有 <code>isWater/isLand/isOcean</code> 三个布尔。单位能不能进入这块地，每个回合要问成千上万次，把规则查询的结果预先算成布尔，比每次查规则集快得多。</p><p><code>allTerrains</code> 是渲染和规则查询用的“地形栈”：基础地形在底、奇观在中间、特征在最上，顺序就是画面叠放顺序。toList 后转 Sequence——先把一次性计算结果固定下来，再对外提供惰性遍历。</p></div></div>
+<p>层序不只是显示问题。查询这块地的规则时（第三课的 unique 机制），<code>Tile.getMatchingUniques</code> 把地形栈、改良、资源的 unique 串在一起查——栈的顺序决定哪层能覆盖哪层。地形带来的产出怎么算、改良完成后数值怎么变，是第 13 课的地块产出主题，本课只建立“层”的概念。</p>
+</section>
+
+<section id="neighbors"><h2>3. 邻居缓存与初始化顺序</h2>
+<p>单位移动、城市扩张、寻路都要反复问“我的邻居是谁”。第五课讲过邻居 = 坐标加六个固定偏移，本课看这份查询怎样缓存下来：</p>
+<div class="paired"><div><pre><code><span class="comment">// NeighborDirection.kt：六个方向，每个绑定一个钟点。</span>
+enum class NeighborDirection(val clockPosition: Int) {
+    TopRight(2), BottomRight(4), Bottom(6),
+    BottomLeft(8), TopLeft(10), Top(12);
+    companion object {
+        val byClockPosition = entries.associateBy { it.clockPosition }
+    }
+}
+
+<span class="comment">// Tile.kt：邻居一次算好，永久缓存。</span>
+<span class="comment">// 原注释：邻居访问极其频繁，且地块邻居永不变，</span>
+<span class="comment">// 所以算一次存起来高效得多。</span>
+@delegate:Transient
+val neighbors: Sequence&lt;Tile&gt; by lazy {
+    if (!isTilemapInitialized()) emptySequence()
+    else getTilesAtDistance(1).toList().asSequence()
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/NeighborDirection.kt">本地 NeighborDirection.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/NeighborDirection.kt#L3">NeighborDirection · L3</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L116">neighbors · L116</a></p></div><div><p>NeighborDirection 是第五课偏移表的“名字版”：六个方向枚举，每个绑定一个钟点，再提供 <code>byClockPosition</code> 反查。代码里需要“描述方向”的场合（河流、道路的边上）用它，需要“算坐标”的场合用钟点表。</p><p><code>neighbors</code> 用 Kotlin 的属性委托 <code>by lazy</code>：第一次访问时才计算，算完把结果存住，以后再访问直接拿缓存。它敢缓存是因为六边形地图的邻居关系是静态的——地块不搬家。toList 把 Sequence 具体化（一次性算完六格），再包回 Sequence 给聚合操作省内存。</p><p>如果这块地还没连上地图（地图编辑器里的预览地块），返回空序列——这就是 <code>isTilemapInitialized</code> 检查的意义。</p></div></div>
+<p>这个“算一次永远用”的缓存，给 setTransients 埋了一个顺序坑。看 TileMap.setTransients 的第二个循环：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap.setTransients（部分代码）：两个循环故意分开。</span>
+for (tileInfo in values) {
+    tileMatrix[tileInfo.position.x - leftX]
+        [tileInfo.position.y - bottomY] = tileInfo
+}
+for ((index, tileInfo) in values.withIndex()) {
+    <span class="comment">// Do ***NOT*** call Tile.setTerrainTransients before</span>
+    <span class="comment">// the tileMatrix is complete - setting transients might</span>
+    <span class="comment">// trigger the neighbors lazy. When that lazy runs,</span>
+    <span class="comment">// some directions might be omitted because</span>
+    <span class="comment">// getIfTileExistsOrNull looks at tileMatrix.</span>
+    <span class="comment">// Thus filling Tiles into tileMatrix and setting their</span>
+    <span class="comment">// transients in the same loop will leave incomplete</span>
+    <span class="comment">// cached `neighbors`.</span>
+    tileInfo.tileMap = this
+    tileInfo.zeroBasedIndex = index
+    tileInfo.ruleset = this.ruleset!!
+    tileInfo.setTerrainTransients()
+    tileInfo.setUnitTransients(setUnitCivTransients)
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L611">双循环 · L611</a></p></div><div><p>第一遍只做一件事：把全部地块填进矩阵。第二遍才重建每块的引用（tileMap 指针、规则集、地形对象等）。为什么不能合成一个循环？作者用整段注释回答了：<code>setTerrainTransients</code> 可能触发 <code>neighbors</code> 的惰性计算，而那个计算会去读 tileMatrix。如果边填矩阵边初始化，前面某块地在计算邻居时矩阵还没填完，它会把“缺了若干方向的邻居”当成最终结果缓存下来——而缓存永远不会自动刷新，这个错会一直带到游戏结束。</p><p>第二遍里还顺手把 <code>zeroBasedIndex</code> 设成 tileList 下标：寻路算法用单个整数位图记录“哪块地访问过”，块编号就是列表下标。tileList 的顺序因此不能随便变——它是存档顺序，也是这个索引。</p></div></div>
+<h3 id="river-edge">一条公共边，究竟读哪个 Tile 的字段</h3>
+<p>每个 Tile 都保存自己<strong>左下、正下、右下</strong>三条边的河流标记。现在只看相邻的 A、B 两块地之间的那一条公共边：如果 B 在 A 的右上方，这条边从 A 看是“右上边”，从 B 看就是“左下边”，所以它的状态保存在 <code>B.hasBottomLeftRiver</code>。</p>
+<figure><img src="../assets/river-shared-edge.svg" width="680" height="360" alt="B 在 A 的右上方，蓝色公共边是 A 的右上边，也是 B 的左下边；河流标记保存在 B.hasBottomLeftRiver。"><figcaption>A 没有 hasTopRightRiver 字段。查询 A 的右上边时，读取 B 的 hasBottomLeftRiver 即可。</figcaption></figure>
+<div class="paired"><div><pre><code><span class="comment">// Tile.isConnectedByRiver 的 when 分支；省略前面的自身比较检查。</span>
+<span class="comment">// 方向均指 otherTile 相对 this 的位置。</span>
+return when (tileMap.getNeighborTileClockPosition(this, otherTile)) {
+    2 -&gt; otherTile.hasBottomLeftRiver  <span class="comment">// 右上：读对方的左下边</span>
+    4 -&gt; hasBottomRightRiver           <span class="comment">// 右下：读自己的右下边</span>
+    6 -&gt; hasBottomRiver                <span class="comment">// 正下：读自己的正下边</span>
+    8 -&gt; hasBottomLeftRiver            <span class="comment">// 左下：读自己的左下边</span>
+    10 -&gt; otherTile.hasBottomRightRiver <span class="comment">// 左上：读对方的右下边</span>
+    12 -&gt; otherTile.hasBottomRiver      <span class="comment">// 正上：读对方的正下边</span>
+    else -&gt; throw Exception("Should never call this function on a non-neighbor!")
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L701">isConnectedByRiver · L701</a></p></div><div><p>先取 otherTile 相对 this 的钟点方向。第一个分支是 2 点钟：对方在右上，公共边就是对方的左下边，所以读 <code>otherTile.hasBottomLeftRiver</code>。</p><p>接着的 4、6、8 点钟分别位于右下、正下、左下；这三条边都由 this 保存，依次读取自己的 <code>hasBottomRightRiver</code>、<code>hasBottomRiver</code>、<code>hasBottomLeftRiver</code>。</p><p>最后的 10、12 点钟位于左上、正上，公共边分别是对方的右下边、正下边，因此又读取 otherTile 的字段。若走到 else，源码会抛异常；原教材“else 返回 false”的注释有误。</p></div></div>
+<p><strong>换一个查询方向，仍然读同一个字段。</strong>上图中，<code>A.isConnectedByRiver(B)</code> 走 2 点钟分支，读取 B.hasBottomLeftRiver；<code>B.isConnectedByRiver(A)</code> 走 8 点钟分支，读取的还是 B.hasBottomLeftRiver。A 自己的三个河流字段描述的是 A 下方另外三条边，与图中这条公共边无关。</p>
+<p>因此，“每块地有三个河流字段”说的是数据放在哪里；“河流状态属于边”说的是每个字段描述什么。这里一个布尔表示<strong>一段公共边</strong>上是否有河，整条蜿蜒的河流可以经过很多段边，由多个布尔共同表示。</p>
+</section>
+
+<section id="wrap"><h2>4. 环绕边界：左右两端怎样接起来</h2>
+<p>先看需求：一张环绕地图的最右边有一块地，单位向右走一步，坐标会落到地图右边之外。程序需要把这个“地图外坐标”换成左边对应的已有地块；如果单位在最左边，则反过来换到右边。</p>
+<h3 id="wrap-axes">要保持上下位置，只改变左右位置</h3>
+<p>第五课的画面换算是 <code>worldX=1.5(y−x)</code>、<code>worldY=(√3/2)(x+y)</code>。省去固定比例，便可以用下面两个量比较位置：</p>
+<pre><code>S = x + y    // 竖直位置：S 相同的地块中心高度相同
+D = y − x    // 水平位置：D 越大，地块越靠右
+
+x 加 1：向左上，S 加 1，D 减 1
+y 加 1：向右上，S 加 1，D 加 1</code></pre>
+<p>于是，<code>x</code> 加 1 和 <code>y</code> 减 1 会让上下变化抵消，留下向左的水平移动：</p>
+<pre><code>(x, y) → (x+r, y−r)
+S' = (x+r) + (y−r) = x+y = S       // 上下位置不变
+D' = (y−r) − (x+r) = D − 2r        // 向左移动 2r 个水平单位</code></pre>
+<p>对宽 <code>W</code> 列的<strong>矩形</strong>环绕地图，源码取 <code>r=W/2</code>。于是 <strong>S 不变、D 减少 W，恰好水平向左平移一整张图</strong>；反方向用 <code>(−r,+r)</code>。S、D 是本节的推导记号，不是像素值或 TileMap 字段。</p>
+<h3 id="wrap-example">用宽 6 的小图走一遍</h3>
+<p>设矩形小图宽 6、高 5，D 的有效范围为 −3..2，<code>r=3</code>。最右侧地块 P(−1,1) 的 2 点钟邻居候选是 Q(−1,2)。Q 的 D=3，超出右边界，给它加上向左一圈的补偿：</p>
+<pre class="diagram"><code>P(−1,1) + (0,1) = Q(−1,2)       // 先按普通邻居规则走一步
+Q(−1,2) + (3,−3) = R(2,−1)        // 再向左平移一整张图
+
+P：S = −1+1 = 0，D = 1−(−1) = 2
+Q：S = −1+2 = 1，D = 2−(−1) = 3
+R：S = 2+(−1) = 1，D = −1−2 = −3</code></pre>
+<p>P 到 Q 是单位移动，所以 S 从 0 变成 1；Q 到 R 是环绕换算，所以 S 保持 1，D 从 3 减少 6 变成 −3。R 就是左边界的对应地块。环绕换算没有创建新 Tile，也没有修改 R.position；它只是把查询坐标换成另一份坐标，再从地图中取出已有对象。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L51">getLatitude / getLongitude · L51</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L127">hex2WorldCoords · L127</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/HexMath.kt#L156">getColumn · L156</a></p>
+<h3>源码依次尝试原坐标、左移坐标、右移坐标</h3>
+<div class="paired"><div><pre><code><span class="comment">// TileMap.getIfTileExistsOrNull：查不到就按环绕补偿。</span>
+@Readonly
+fun getIfTileExistsOrNull(x: Int, y: Int): Tile? {
+    val tile = getOrNull(x, y)
+    if (tile != null) return tile
+
+    if (!mapParameters.worldWrap)
+        return null
+
+    var radius = mapParameters.mapSize.radius
+    if (mapParameters.shape == MapShape.rectangular)
+        radius = mapParameters.mapSize.width / 2
+
+    <span class="comment">// A. 从右绕到左：可能落在“世界尽头”的另一侧</span>
+    val rightSideTile = getOrNull(x + radius, y - radius)
+    if (rightSideTile != null) return rightSideTile
+
+    <span class="comment">// B. 从左绕到右</span>
+    val leftSideTile = getOrNull(x - radius, y + radius)
+    if (leftSideTile != null) return leftSideTile
+
+    return null
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L380">getIfTileExistsOrNull · L380</a><a href="../../core/src/com/unciv/logic/map/MapParameters.kt">本地 MapParameters.kt</a></p></div><div><p>先调用 getOrNull 查原坐标；命中就返回。未命中时，若没有开启 worldWrap，返回 null。</p><p>接着确定 radius：矩形图取 mapSize.width / 2，其他形状使用 mapSize.radius。</p><p>A 分支试 <code>(x+radius, y−radius)</code>，也就是向左平移一整张图；B 分支试 <code>(x−radius, y+radius)</code>，也就是向右平移一整张图。任一候选命中就返回已有 Tile。</p><p>两次都查不到才返回 null。越过南北边界的坐标，即使左右平移后仍可能不在地图内。</p></div></div>
+<details class="rubric"><summary>延伸阅读：源码命名、环绕距离与方向</summary>
+<p>源码命名：<code>getLatitude=x+y</code>，<code>getLongitude=x−y</code>；<code>getColumn=y−x</code>，与 getLongitude 符号相反。第五课原先把 getLongitude 写成 y−x 有误，现已更正。</p>
+<p>本节宽 6 的图用于手算和直接调用源码；正常新游戏界面另有尺寸限制。直接构造时还需配置 mapParameters.shape、mapSize、worldWrap，查询会读取这些参数。方法只各尝试一次左右平移。</p>
+<p>量距离时还会反过来操作：已知地图内的一块地，找它在地图外的等价位置。下面的 getUnwrappedPosition 使用原点 (0,0) 作选择依据：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap.getUnwrappedPosition：找地图外“离原点最近”的等价坐标。</span>
+@Readonly
+fun getUnwrappedPosition(position: HexCoord): HexCoord {
+    if (!contains(position))
+        return position <span class="comment">// 已在地图外，不需要展开</span>
+
+    val radius = if (mapParameters.shape == MapShape.rectangular)
+        mapParameters.mapSize.width / 2
+    else mapParameters.mapSize.radius
+
+    val vectorUnwrappedLeft  = HexCoord.of(position.x + radius, position.y - radius)
+    val vectorUnwrappedRight = HexCoord.of(position.x - radius, position.y + radius)
+
+    fun squareSum(hexCoord: HexCoord): Int {
+        val x = hexCoord.x
+        val y = hexCoord.y
+        return x * x + y * y
+    }
+
+    <span class="comment">// 平方和小的就是离原点近的一侧</span>
+    return if (squareSum(vectorUnwrappedRight) &lt; squareSum(vectorUnwrappedLeft))
+        vectorUnwrappedRight
+    else vectorUnwrappedLeft
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L463">getUnwrappedPosition · L463</a></p></div><div><p>若传入坐标已经在地图外，直接返回；否则按形状确定 radius，计算向左、向右各平移一圈的两个候选位置。</p><p>squareSum 分别计算候选位置的 x²+y²，return 选择值较小的一项，相等时取左侧候选。这两个候选的高度相同，因此这次比较也会选出水平方向上离原点更近的一项。</p><p>每个候选与原位置相隔一圈，两候选之间相隔两圈。方法没有接收观察者的位置，也不检查 worldWrap 开关；调用方须判断是否需要展开。返回的是计算用坐标，不保证地图内有该坐标对应的 Tile。</p></div></div>
+<p>绕了圈，两块地的距离也得跟着变。第五课的 getDistance 不处理环绕，Tile.aerialDistanceTo 把它补上：</p>
+<div class="paired"><div><pre><code><span class="comment">// Tile.aerialDistanceTo（部分代码）：带环绕的距离。</span>
+val distance = maxOf(abs(xDelta), abs(yDelta), abs(xDelta - yDelta))
+
+if (!tileMap.mapParameters.worldWrap || distance &lt;= tileMap.width / 2)
+    return distance
+
+<span class="comment">// 距离超过半个世界宽：把对方展开到地图外等价坐标，再量一次</span>
+val otherTileUnwrappedPos = tileMap.getUnwrappedPosition(otherPositionHexcoord)
+val xDeltaWrapped = positionHexcoord.x - otherTileUnwrappedPos.x
+val yDeltaWrapped = positionHexcoord.y - otherTileUnwrappedPos.y
+val wrappedDistance =
+    maxOf(abs(xDeltaWrapped), abs(yDeltaWrapped), abs(xDeltaWrapped - yDeltaWrapped))
+
+return min(distance, wrappedDistance)</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L666">aerialDistanceTo · L666</a></p></div><div><p>先按三分量 max 公式算普通六边形距离。若没有开启环绕，或该距离不超过 tileMap.width / 2，代码直接返回；这里 width 来自地块的最大、最小列号。</p><p>否则调用 getUnwrappedPosition 取得对方的一个展开坐标，重新计算距离，最后取两次距离的较小值。上面的宽 6 列例子中，P(−1,1) 到 R(2,−1) 普通距离为 5；R 的展开坐标是 Q(−1,2)，到 P 的距离为 1，因此返回 1。这是几何距离，实际移动还要考虑地形、单位通行规则等条件。</p></div></div>
+<p>环绕还影响“反推方向”：跨接缝的相邻地块，保存的坐标差会在邻居偏移之外多出一圈平移量。下面看 getNeighborTileClockPosition 的相关分支；使用时应先确定传入的两个地块相邻：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap.getNeighborTileClockPosition（部分代码）：</span>
+<span class="comment">// 除直接坐标差外，还要试“对方平移一个世界宽”后的差。</span>
+val xWrapDifferenceBottom = if (radius &lt; 3) 0 else x1 - (x2 - radius)
+val yWrapDifferenceBottom = if (radius &lt; 3) 0 else y1 - (y2 - radius)
+val xWrapDifferenceTop = if (radius &lt; 3) 0 else x1 - (x2 + radius)
+val yWrapDifferenceTop = if (radius &lt; 3) 0 else y1 - (y2 + radius)
+
+return when {
+    xDifference == 1 &amp;&amp; yDifference == 1 -&gt; 6
+    xDifference == -1 &amp;&amp; yDifference == -1 -&gt; 12
+    xDifference == 1 || xWrapDifferenceBottom == 1 -&gt; 4
+    yDifference == 1 || yWrapDifferenceBottom == 1 -&gt; 8
+    xDifference == -1 || xWrapDifferenceTop == -1 -&gt; 10
+    yDifference == -1 || yWrapDifferenceTop == -1 -&gt; 2
+    else -&gt; -1
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L410">getNeighborTileClockPosition · L410</a></p></div><div><p>前四行分别计算对方 x 或 y 加减 radius 后的差；radius 小于 3 时将这些差置 0，使后面的 ±1 比较不命中。</p><p>when 先用两个直接坐标差识别正下、正上。接着用直接差或补偿后的单个分量识别 4、8、10、2 点钟。宽 6 列例子中，从 P(−1,1) 看 R(2,−1)，最后一个条件 <code>y1 − (y2 + radius) = 1 − (−1 + 3) = −1</code> 命中，因此得到 2 点钟。</p><p>这些分支不是完整的相邻校验：部分分支只检查一个分量，方法本身也不检查 worldWrap。不能用“结果不为 −1”证明任意两格相邻。源码没有解释 radius &lt; 3 的完整设计原因，本课只说明其实际行为。</p></div></div>
+<aside class="callout"><strong>Godot 对照：先确定逻辑坐标的含义</strong><p>若自己的地图用列号、行号管理，左右环绕可以先把列号换算进有效区间，再查地块。若像 Unciv 一样用两个斜轴坐标，就需要换算出同时满足“高度不变、左右移动一圈”的 Δx、Δy。矩形图宽为偶数时，W/2 是整数，(W/2,−W/2) 才能落在整数 HexCoord 上。这里讨论逻辑坐标，接到 Godot 地块坐标前还要核对引擎的排列约定。</p></aside>
+</details>
+</section>
+
+<section id="shapes"><h2>5. 两种形状与测试防线</h2>
+<p>TileMap 有两个构造器，对应两种地图形状：按半径的六边形、按宽高的矩形。生成器用它们造出“底图”，再往上铺地形（第 07 课的主场）：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap 按半径构造器（部分代码）：正六边形地图。</span>
+constructor(radius: Int, ruleset: Ruleset, worldWrap: Boolean = false)
+        : this (HexMath.getNumberOfTilesInHexagon(radius)) {
+    ...
+    for (vector in HexMath.getHexCoordsInDistance(HexCoord.Zero, radius, worldWrap))
+        tileList.add(Tile().apply {
+            position = vector.asSerializable()
+            baseTerrain = firstAvailableLandTerrain
+        })
+    setTransients(ruleset)
+}
+
+<span class="comment">// TileMap 按宽高构造器（部分代码）：矩形地图。</span>
+<span class="comment">// world-wrap maps must always have an even width, so round down</span>
+val wrapAdjustedWidth = if (worldWrap &amp;&amp; width % 2 != 0) width - 1 else width
+<span class="comment">// 偶数宽：列范围 -w/2..(w-1)/2，例如 w=4 → -2..1</span>
+for (column in -wrapAdjustedWidth / 2 .. (wrapAdjustedWidth-1) / 2)
+    for (row in -height / 2 .. (height-1) / 2)
+        tileList.add(Tile().apply {
+            position = HexMath.getTileCoordsFromColumnRow(column, row).asSerializable()
+            baseTerrain = firstAvailableLandTerrain
+        })
+setTransients(ruleset)</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L165">构造器 · L165</a></p></div><div><p>六边形构造器先用第五课的环公式算出总格数预分配列表，再枚举到中心距离 ≤ radius 的全部坐标，每格放一块“统一陆地”的 Tile。矩形构造器用“列行”思维枚举，再经 <code>getTileCoordsFromColumnRow</code>（HexMath 里 column = y−x、row = (x+y)/2 的反解）换算成 HexCoord。</p><p>两个构造器最后都调用 setTransients，把矩阵立即建好——所以新生成的地图立即可查。底图全是同一种陆地，真正的陆海分布、山脉、资源由 MapGenerator 分阶段往上写（第 07～10 课），TileMap 只提供“摆好了格子”的容器。</p></div></div>
+<p>第四课说过测试是一等源码。地图这块没有“断言矩阵每个格子”的测试，但有两条守护生成结果的防线，一条保证所有组合都能生成，一条做统计体检：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerationTests.testAllMapGenerations（部分代码）：</span>
+<span class="comment">// 所有地图类型 × 形状 × 环绕开关，都必须能生成出来。</span>
+for (mapType in MapType.allValues) {
+    for (mapShape in MapShape.allValues) {
+        for (worldWrap in listOf(true, false)) {
+            mapParameters.shape = mapShape
+            mapParameters.worldWrap = worldWrap
+            mapGenerator.generateMap(mapParameters)
+        }
+    }
+}
+
+<span class="comment">// terrainTileCountsReasonableForHexMaps（部分代码）：</span>
+<span class="comment">// 聚合 20 张图统计各地形数量，离预期太远就判失败。</span>
+for (seed in 1L..20L) {
+    val tileMap = mapGenerator.generateMap(mapParameters)
+    for (tile in tileMap.tileList)
+        terrainCounts.compute(tile.baseTerrain) { _, old -&gt; 1 + (old ?: 0) }
+}
+<span class="comment">// 不是硬限制：差得离谱才说明生成器坏了</span>
+assertApproximately(terrainCounts["Ocean"], 4079)
+assertApproximately(terrainCounts["Coast"], 2443)</code></pre><p class="source"><a href="../../tests/src/com/unciv/logic/map/MapGenerationTests.kt">本地 MapGenerationTests.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/MapGenerationTests.kt#L16">testAllMapGenerations · L16</a></p></div><div><p>第一条是烟雾测试：13 种地图类型 × 3 种形状 × 2 种环绕开关全部跑一遍，任何组合抛异常都会失败。它不检查地图长得好不好看，只保证“容器 + 各生成阶段”对每种配置都能走通。</p><p>第二条是分布测试：单张地图的海洋数量随种子波动很大（注释说“极端多变”），所以聚合 20 张图再比较各地形数量是否落在预期区间的 2 倍范围内。某天有人改了噪声参数导致全世界变成海洋，这条会立刻报警。测试文件里同一个断言模式分别跑六边形、矩形、平面地球三种形状。</p></div></div>
+<p>第四课的 TestGame 工具里也封装了这两个构造器，测试里造小地图就靠它们：</p>
+<div class="paired"><div><pre><code><span class="comment">// TestGame.kt（部分代码）：测试里快速换地图。</span>
+<span class="comment">// 造一张矩形地图，替换当前地图</span>
+fun makeRectangularMap(newHeight: Int, newWidth: Int, baseTerrain: String) {
+    val newTileMap = TileMap(newWidth, newHeight, ruleset, tileMap.mapParameters.worldWrap)
+    ...
+    gameInfo.tileMap = newTileMap
+}
+
+<span class="comment">// 造一张六边形地图</span>
+fun makeHexagonalMap(newRadius: Int, baseTerrain: String) {
+    val newTileMap = TileMap(newRadius, ruleset, false)
+    ...
+    gameInfo.tileMap = newTileMap
+}</code></pre><p class="source"><a href="../../tests/src/com/unciv/testing/TestGame.kt">本地 TestGame.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/testing/TestGame.kt#L100">TestGame · L100</a></p></div><div><p>测试想验证“两块地之间隔着河能不能通船”，就先 <code>makeHexagonalMap(5)</code> 拿一张半径 5 的空底图，再把地形、河流写到指定格子上——第四课“用最小场景验证联动”的地图部分就是这么搭出来的。</p><p>这两个助手直接调用本课的 TileMap 构造器，说明构造器本身就是最小可用单元：不依赖游戏、不依赖生成器，只依赖 Ruleset。这也是为什么第 2 节说“底图全是统一陆地”。</p></div></div>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>tileList 保存地块列表，tileMatrix 保存同一批对象的坐标索引；矩阵不写进存档，由 setTransients 重建。</strong></li><li><strong>查块用 (x−leftX, y−bottomY)；包围盒内也可能没有地块。get 对无效坐标抛异常，getOrNull 返回 null。</strong></li><li><strong>地块分别保存基础地形、特征、奇观、资源、改良和道路状态；地形名字通过规则集查回对象。</strong></li><li><strong>每格保存自己左下、正下、右下三条边的河流标记；查询上方三条边时读对应邻居的字段。同一条公共边，从两侧查询都读同一个布尔。</strong></li><li><strong>neighbors 首次访问后缓存结果；setTransients 必须先填满矩阵，再进行可能触发邻居查询的初始化。</strong></li><li><strong>矩形图宽 W=2r：加 (r,−r)，竖直位置 S=x+y 不变，水平位置 D=y−x 减少 W，查到左侧的对应地块。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；不看资料手算出矩阵布局和环绕补偿，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="a"><fieldset><legend>1. tileList 与 tileMatrix 并存，哪份参与序列化？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="tileList 是全部地块的权威列表，写进存档；tileMatrix 标了 @Transient。"><span>对象列表那一位</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="矩阵是运行时索引，标注 @Transient，不写存档，读档后由 setTransients 重建。"><span>坐标矩阵那一份</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="两份存的是同一批对象，只写列表一份，避免存档翻倍。"><span>两样都一并存档</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="没有随机成分：谁序列化由 @Transient 注解明确决定。"><span>按字段名随机选</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>2. 读档之后，tileMatrix 在什么时候建好？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="GameInfo.setTransients 会调用 TileMap.setTransients，扫一遍 tileList 建矩阵。"><span>读档时一步建好</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="读档是反序列化，不经过构造器；矩阵是 @Transient 字段，必须显式重建。"><span>构造器里直接建</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="每查一次建一次会失去 O(1) 索引的意义，也没有这样的代码。"><span>每次查询之前建</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="生成的底图在构造器里就建好矩阵；读档走的是 setTransients 路径。"><span>地图生成后才建</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>3. tileMap[x, y] 的坐标落在矩阵空洞上会怎样？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="get 末尾的 !! 把 null 变成异常，热路径不付检查开销；温和查询用 getOrNull。"><span>直接抛空指针异常</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="空洞位置存的就是 null，get 用 !! 拆包，不会造占位对象。"><span>返回空引用的占位</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="环绕补偿在 getIfTileExistsOrNull 里做，get/getOrNull 都不绕。"><span>它内部自动做环绕</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="get 的返回类型是 Tile，无法返回空地块；它选择直接抛异常。"><span>它会返回空的地块</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. 矩形环绕图宽 W=2r，右边界外的查询位置应怎样向左换算一圈？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="竖直位置 (x+r)+(y−r)=x+y 不变；水平位置 (y−r)−(x+r)=y−x−2r，恰好向左 W 列。"><span>(x+r, y−r) 来补偿</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="S 减少 2r，D 不变，这是纯向下平移。"><span>(x−r, y−r) 来补偿</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="S 增加 2r，D 不变，这是纯向上平移。"><span>(x+r, y+r) 来补偿</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="S 不变，但 D 增加 2r，这是向右平移一圈。"><span>(x−r, y+r) 来补偿</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：对象列表那一位；2：读档时一步建好；3：直接抛空指针异常；4：(x+r, y−r) 来补偿。分别对应 <a href="#storage">两份存储</a>、<a href="#storage">setTransients</a>、<a href="#storage">get 与 getOrNull</a>、<a href="#wrap">环绕边界</a>。</p></details>
+<h3>练习 A · 手算半径 2 的矩阵（6 分钟）</h3><p>不看第 1 节的图：写出半径 2 六边形地图的 tileList 格数、矩阵行列数，标出六个 null 的位置，并解释每个 null 为什么出界（用第五课的 getDistance 两分支）。</p><details class="rubric"><summary>展开核对要点</summary><p>tileList = 1 + 6×2×3/2 = 19 块；矩阵 5×5。null 六个：(−2,2)、(−1,2)、(−2,1)、(2,−1)、(1,−2)、(2,−2)。判定：到中心 (0,0) 的距离超过 2 就出界。例如 (−2,2)：Δx、Δy 异号 → |Δx|+|Δy| = 4 &gt; 2；(2,−2) 同理。而在界内的 (2,2)：同号 → max(2,2) = 2。手算完对照第 1 节的图检查。</p></details>
+<h3>练习 B · 环绕与公共边（6 分钟）</h3><p>在第 4 节的小图上，从 R(2,−1) 查询 8 点钟邻居：候选坐标是什么，换算后命中哪个 Tile？用 S、D 说明移动方向。再看河流图：A 查 B 与 B 查 A 各走哪个分支、读哪个字段？</p><details class="rubric"><summary>展开核对要点</summary><p>候选为 (2,−2)，S=0、D=−4，越过左边界。向左加 (3,−3) 得 (5,−5)，查不到；向右加 (−3,3) 得 P(−1,1)，S 仍为 0、D 变为 2，命中最右侧。河流查询：A 查 B 走 2 点钟，B 查 A 走 8 点钟，两次都读 B.hasBottomLeftRiver。</p></details>
+<h3>练习 C · 用三要素读测试（5 分钟）</h3><p>对 MapGenerationTests.testAllMapGenerations 写出 given、when、then，并说明它为什么不断言地图长什么样。</p><details class="rubric"><summary>展开核对要点</summary><p>given：内置规则集 + 全部地图类型×形状×环绕开关的组合；when：每种组合调用 mapGenerator.generateMap；then：不抛异常（测试通过即断言完成）。它不断言外观，是因为单张地图随机性太大，外观正确性交给 terrainTileCountsReasonableFor* 系列分布测试（聚合 20 张图比较数量区间）。两类测试分工：烟雾测试管“能生成”，分布测试管“没改坏”。</p></details>
+<h3>练习 D · 本地核验（可选，5～10 分钟）</h3><p>跑 <code>:tests:test --tests "com.unciv.logic.map.HexmathTests"</code> 确认环境（第五课已跑通则跳过）；有余力再跑 <code>:tests:test --tests "com.unciv.logic.map.MapGenerationTests"</code>，观察三种形状的统计断言。</p><details class="rubric"><summary>展开核对要点</summary><p>HexmathTests 应 8 过 0 失败（本课程核对时 Gradle MCP 实测）。MapGenerationTests 会真跑地图生成，几十秒到几分钟：testAllMapGenerations 遍历全部组合，三条 terrainTileCountsReasonableFor* 各生成 20 张图做统计。它们不依赖存档文件，是第 06 课“容器与生成链路健康”的可执行证据。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/TileMap.kt">TileMap.kt</a> 全文（重点在字段区、setTransients、getIfTileExistsOrNull、getUnwrappedPosition、getNeighborTileClockPosition），再读 <a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">Tile.kt</a> 的字段区、neighbors 与 setTerrainTransients，最后对照 <a href="../../tests/src/com/unciv/logic/map/MapGenerationTests.kt">MapGenerationTests.kt</a>。速查表见 <a href="reference/hexmath.html">地图与坐标速查</a>（第 06 课后已补“地块存储与环绕”一节）。</p><p>下次学习前，用两分钟默写：tileList 与 tileMatrix 的分工、五个数据层、环绕补偿向量 (radius, −radius) 为什么保持纬度不变；约一周后再做练习 A 和 B。如果记不清“先填矩阵还是先建引用”，回第 3 节看那段英文注释推一遍，别直接背结论。</p><p>有不清楚的步骤，可以直接问教学助手。说说你手算了哪个例子、哪里对不上，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0005-hex-coordinates.html">上一课：六边形如何编号</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="0007-map-generation.html">下一课：地图生成流水线</a></div></section>
+<footer>资料核对：2026-09-11。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。</footer>
+</main></div>
+</body>
+</html>

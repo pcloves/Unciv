@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>从 Unciv 到 Godot · 六边形策略游戏系统</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="#phase-a">A · 全局模型 01～04</a><a href="#phase-b">B · 地图专题 05～12</a><a href="#phase-c">C · 经济专题 13～19</a><a href="#phase-d">D · 系统联动 20～24</a><a href="#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图速查</a><a href="COURSE.md">详细课程设计</a></header>
+<div class="layout">
+<nav class="toc" aria-label="课程阶段"><strong>课程路线 · 28 课</strong><a href="#overview">课程目标</a><a href="#phase-a">A / 全局模型</a><a href="#phase-b">B / 地图专题</a><a href="#phase-c">C / 经济专题</a><a href="#phase-d">D / 系统联动</a><a href="#phase-e">E / 工程与迁移</a><a href="#records">档案与资料</a><p class="meta">每课 40～60 分钟<br>源码基线 1df6249<br>01～16 课已制作<br>其余课程已规划</p></nav>
+<main id="main">
+<div id="overview"><div class="eyebrow">先看游戏怎样运行，再看各系统怎样配合</div><h1>从 Unciv 到 Godot：六边形策略游戏系统</h1><p class="lead">读懂一局游戏如何组织数据、生成世界、计算经济，再判断哪些做法适合自己的六边形游戏。</p><p>面向熟悉 Java、具备基础 Kotlin 和 Godot 2D 经验的开发者。课程以 Unciv 源码为主，结合武侠门派经营、古代城池建设和武侠探险，讨论这些做法可以怎样用到自己的游戏中。</p><p><a href="0001-runtime-map.html"><strong>开始第 01 课：下一回合由谁推进</strong></a> · <a href="reference/architecture.html#glossary">术语表</a></p></div>
+<ol class="flow" aria-label="学习顺序"><li><strong>状态与规则</strong><span>先弄清游戏数据放在哪里、由谁管理。</span></li><li><strong>空间与地图</strong><span>再看地图如何生成、地块如何查询。</span></li><li><strong>产出与结算</strong><span>跟着一项产出，看它怎样算进城市和文明。</span></li><li><strong>验证与迁移</strong><span>用代码验证理解，再考虑自己的游戏怎么做。</span></li></ol>
+<section id="phase-a"><h2>A / 全局模型</h2><p>先弄清四件事：数据放在哪里，规则怎么定义，回合由谁推进，界面怎么显示。</p><table><thead><tr><th scope="col">课</th><th scope="col">主题</th><th scope="col">本课带走什么</th><th scope="col">教材</th></tr></thead><tbody>
+<tr><td class="number">01</td><td><a href="0001-runtime-map.html">下一回合由谁推进</a></td><td>按钮到新局面的完整调用链</td><td class="state ready">可阅读</td></tr>
+<tr id="lesson-02"><td class="number">02</td><td><a href="0002-data-ownership.html">一局游戏的数据归谁</a></td><td>状态树、运行时引用与玩家视角</td><td class="state ready">可阅读</td></tr>
+<tr id="lesson-03"><td class="number">03</td><td><a href="0003-rule-pipeline.html">一条规则怎样进入游戏</a></td><td>规则定义、实例与 Unique 条件</td><td class="state ready">可阅读</td></tr>
+<tr id="lesson-04"><td class="number">04</td><td><a href="0004-reading-with-evidence.html">怎样用证据读源码</a></td><td>测试入口、断点、输入与预期</td><td class="state ready">可阅读</td></tr>
+</tbody></table></section>
+<section id="phase-b"><h2>B / 地图专题</h2><p>第 07～10 课专门讲地图生成：先生成陆海和地形，再安排出生点与资源，让地图既能显示，也适合实际游玩。</p><table><thead><tr><th scope="col">课</th><th scope="col">主题</th><th scope="col">本课带走什么</th><th scope="col">教材</th></tr></thead><tbody>
+<tr id="lesson-05"><td class="number">05</td><td><a href="0005-hex-coordinates.html">六边形如何编号</a></td><td>轴方向、邻接、距离和坐标转换</td><td class="state ready">可阅读</td></tr><tr id="lesson-06"><td class="number">06</td><td><a href="0006-tilemap.html">地块怎样组成地图</a></td><td>存储、地块分层和环绕边界</td><td class="state ready">可阅读</td></tr><tr id="lesson-07"><td class="number">07</td><td><a href="0007-map-generation.html">地图生成流水线</a></td><td>阶段依赖、分支与随机性边界</td><td class="state ready">可阅读</td></tr><tr id="lesson-08"><td class="number">08</td><td><a href="0008-landmass-climate.html">陆海与气候分布</a></td><td>噪声场、阈值和分布的联系</td><td class="state ready">可阅读</td></tr><tr id="lesson-09"><td class="number">09</td><td><a href="0009-elevation-rivers.html">山地与河流</a></td><td>格子与边、生成约束与修正</td><td class="state ready">可阅读</td></tr><tr id="lesson-10"><td class="number">10</td><td><a href="0010-starts-resources.html">可玩的出生地与资源</a></td><td>区域分配、出生点评价和资源摆放</td><td class="state ready">可阅读</td></tr><tr id="lesson-11"><td class="number">11</td><td><a href="0011-movement-pathing.html">移动代价与寻路</a></td><td>几何距离、通行规则与路径成本</td><td class="state ready">可阅读</td></tr><tr id="lesson-12"><td class="number">12</td><td><a href="0012-sight-fog.html">地图怎样被看见</a></td><td>视线、探索与迷雾分层</td><td class="state ready">可阅读</td></tr>
+</tbody></table><p class="meta">第 05～12 课已可阅读，其余正文待制作。验收：从生成参数追踪到地块、出生点、寻路与显示。</p></section>
+<section id="phase-c"><h2>C / 经济专题</h2><p>按数值的流向组织课程：地块 → 人口 → 城市 → 文明 → 贸易与反馈。</p><table><thead><tr><th scope="col">课</th><th scope="col">主题</th><th scope="col">本课带走什么</th><th scope="col">教材</th></tr></thead><tbody>
+<tr id="lesson-13"><td class="number">13</td><td><a href="0013-tile-yields.html">一块地怎样变成产出</a></td><td>结算单、来源与百分数修正层</td><td class="state ready">可阅读</td></tr>
+<tr id="lesson-14"><td class="number">14</td><td><a href="0014-population-growth.html">人口怎样工作和增长</a></td><td>工作分配、粮食结余与增长</td><td class="state ready">可阅读</td></tr>
+<tr id="lesson-15"><td class="number">15</td><td><a href="0015-production-construction.html">生产力怎样完成建造</a></td><td>累积、完成时机、溢出与单位行动</td><td class="state ready">可阅读</td></tr>
+<tr id="lesson-16"><td class="number">16</td><td><a href="0016-civilization-economy.html">城市怎样进入文明账本</a></td><td>净流量、存量、维护费与幸福度</td><td class="state ready">可阅读</td></tr><tr id="lesson-17"><td class="number">17</td><td>资源怎样被接入与消耗</td><td>供应、库存、改良与连接</td><td class="state planned">规划中</td></tr><tr><td class="number">18</td><td>贸易怎样改变经济</td><td>交易签订、持续影响和失效</td><td class="state planned">规划中</td></tr><tr><td class="number">19</td><td>经济因果链复盘</td><td>定位“改良完成但收入没增加”</td><td class="state planned">规划中</td></tr>
+</tbody></table><p class="meta">第 13～16 课已可阅读，其余正文待制作。学完后应能列出一项收支的来源，解释它怎样影响本回合和下一回合。</p></section>
+<section id="phase-d"><h2>D / 系统联动</h2><table><thead><tr><th scope="col">课</th><th scope="col">主题</th><th scope="col">本课带走什么</th></tr></thead><tbody>
+<tr><td class="number">20</td><td>单位行动的生命周期</td><td>移动、自动命令与回合重置</td></tr><tr><td class="number">21</td><td>战斗如何改写局面</td><td>预览、判定、提交与后续影响</td></tr><tr><td class="number">22</td><td>科技政策怎样改变规则</td><td>解锁、条件与能力变化</td></tr><tr><td class="number">23</td><td>AI 怎样使用同一套系统</td><td>候选、评分、执行与合法性</td></tr><tr><td class="number">24</td><td>跨系统事件与外交</td><td>触发时机、传播路径与重复应用</td></tr>
+</tbody></table><p class="meta">本阶段正文待制作。验收：画出一个变化影响至少三个系统的证据链。</p></section>
+<section id="phase-e"><h2>E / 工程复盘与迁移</h2><table><thead><tr><th scope="col">课</th><th scope="col">主题</th><th scope="col">本课带走什么</th></tr></thead><tbody>
+<tr><td class="number">25</td><td>保存的状态怎样活过来</td><td>读档、重建、兼容与缓存</td></tr><tr><td class="number">26</td><td>下一回合为何变慢</td><td>阶段测量与性能归因</td></tr><tr><td class="number">27</td><td>用最小场景验证联动</td><td>复现、预测与测试证据</td></tr><tr><td class="number">28</td><td>带走什么到 Godot</td><td>三类游戏与三种时间机制的设计对照</td></tr>
+</tbody></table><p class="meta">本阶段正文待制作。验收：一份有依据的设计草图，不要求同步编写 Godot 原型。</p></section>
+<section id="records"><h2>档案与资料</h2><p><a href="MISSION.md">学习目标</a> · <a href="COURSE.md">每课的基础要求与练习目标</a> · <a href="RESOURCES.md">参考资料</a> · <a href="NOTES.md">当前进度</a> · <a href="learning-records/0001-prior-knowledge.md">已有基础</a></p><p>预计学习时间约 19～28 小时。下一次学习前，先不看资料，试着复述上一课的主要过程；过一周再做一次相关练习。根据哪些内容容易忘，调整复习间隔。</p><p>遇到解释不通的调用或结算结果，可以直接问教学助手，并附上课号、方法名和自己的推演。</p></section>
+<footer>源码基线：1df6249a41301056ddc4448a95a93ddf5403e061 · 资料核对：2026-09-10</footer>
+</main></div></body></html>

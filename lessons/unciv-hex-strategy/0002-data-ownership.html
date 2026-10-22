@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>02 · 一局游戏的数据归谁 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>02 / 一局游戏的数据归谁</strong><a href="#goal">目标、回顾与场景</a><a href="#root">1. 状态树的根</a><a href="#coords">2. 城市只记坐标</a><a href="#transient">3. 存档与运行时引用</a><a href="#view">4. 不同的观察视角</a><a href="#classify">5. 三类数据与取舍</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 50～60 分钟<br>需先完成第一课<br>含源码走读与练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第一阶段 / 建立全局模型</div>
+<h1>一局游戏的数据归谁</h1>
+<p class="lead">上一课看到“下一回合”会复制整局状态、补全运行时数据再结算。这节课把镜头对准这些数据：它们平时挂在谁名下，哪些写进存档，哪些在运行时要重新补上。</p>
+<p class="meta">需要的基础：Java 对象、集合、引用，以及基础 Kotlin；第一课的 clone 与 setTransients 概念。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>做经营或探险游戏时，常会遇到这类问题：界面上的某个数值不对，该去查哪份数据？存了档再读回来，城市为什么找不到自己的地块？为什么敌人单位明明在地图上，玩家却看不见？这节课把一局游戏的数据画成一张“归属地图”，以后读任何代码，都能先判断手头的字段属于哪一类、归谁管。</p>
+<h3>先找回第一课的主链</h3>
+<pre><code>NextTurnButton → WorldScreen.nextTurn
+  → 后台：clone → setTransients → GameInfo.nextTurn（文明轮转、城市结算）
+  → startNewScreenJob → 新 WorldScreen</code></pre>
+<p>第一课回答“谁推进回合”，留下两个悬而未决的问题：<strong>clone 到底复制了什么？setTransients 补的是什么？</strong>本课把这两个问题讲透，顺便看清平时这些数据分别归谁管。第一课选读中关于协程等待的复习题放在本课练习末尾，不在这里展开。</p>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>数据树：</strong>GameInfo、Civilization、City、TileMap、Tile 之间谁持有谁？</li><li><strong>存档与引用：</strong>哪些字段写进存档，哪些引用在运行时才存在？</li><li><strong>视角：</strong>同一个世界里，玩家、敌人和观战者看到的数据为什么不同？</li></ul><p>读源码时记得问自己：这个字段属于哪一类——<strong>对局状态</strong>、<strong>规则定义</strong>，还是<strong>运行时引用</strong>？三类数据的保存方式和重建方式不同，本课结尾会给出判断口诀。</p></div><div><h3>先认识三个概念</h3><ul><li><strong>序列化字段：</strong>写进存档的字段。它们必须是 ID、名字、坐标、数值等能变成文本的数据，不能是对象引用。</li><li><strong>@Transient 字段：</strong>序列化时忽略，不写进存档；读档后由 <code>setTransients</code> 按保存的 ID、名字、坐标重新补上。</li><li><strong>视角（View）：</strong>包装同一份状态、从某个文明的角度提供数据。界面通过视角拿数据，而不是直接拿底层对象。</li></ul><p class="source"><a href="reference/architecture.html#glossary">术语表</a><a href="../../docs/Developers/Saved-games-and-transients.md">官方存档与 transients 说明</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>回顾与状态树</td><td>8 分钟</td><td>一局游戏的数据从哪个根对象开始挂</td></tr><tr><td>城市与地块的存储</td><td>12 分钟</td><td>为什么城市只存坐标，不存地块副本</td></tr><tr><td>存档字段与运行时引用</td><td>12 分钟</td><td>@Transient 字段在什么时候、由谁补上</td></tr><tr><td>视角与三类数据</td><td>8 分钟</td><td>同一个世界为什么有不同视角</td></tr><tr><td>心智模型与推演</td><td>12～16 分钟</td><td>读档后城市怎样找回地块；看不见的单位去哪了</td></tr></tbody></table>
+</section>
+
+<section id="root"><h2>1. 状态树的根：GameInfo</h2>
+<p><code>UncivGame.gameInfo</code> 保存着“正在玩的这一局”，而 <code>GameInfo</code> 是这一局所有状态的根：凡是需要写进存档的东西，都挂在这棵树上。</p>
+<div class="paired"><div><pre><code><span class="comment">// GameInfo 中与本课相关的字段。</span>
+var civilizations = ArrayList&lt;Civilization&gt;()
+var barbarians = BarbarianManager()
+var religions: HashMap&lt;String, Religion&gt; = hashMapOf()
+var tileMap: TileMap = TileMap()
+var gameParameters = GameParameters()
+var turns = 0
+var currentPlayer = ""
+
+<span class="comment">// 运行时需要的对象不写进存档，读档后由 setTransients 补上。</span>
+@Transient
+lateinit var currentPlayerCiv: Civilization
+@Transient
+lateinit var ruleset: Ruleset</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/GameInfo.kt">本地 GameInfo.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L107">字段 · L107、L172、L180</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/UncivGame.kt#L63">UncivGame.gameInfo · L63</a></p></div><div><p><code>civilizations</code> 和 <code>tileMap</code> 是两棵主要的子树：文明管理自己的城市和事务，地图管理全部地块。回合数、当前玩家、开局设置等整局信息也在这里。</p><p><code>ruleset</code> 是<strong>规则定义</strong>：有什么地形、建筑、单位。它不写进存档，读档时按 <code>gameParameters</code> 里的规则集名字重新取一份。这棵状态树和规则定义的关系，第 3 课专门讲。</p><p>注意 <code>IsPartOfGameInfoSerialization</code>：类实现这个接口，表示它可以出现在存档里。它不是普通的标记——文档注释里明确写了序列化规则，比如不能用抽象类型作字段、<code>by lazy</code> 字段必须排除，避免 libGDX 的 JSON 库读到不认识的类型。</p></div></div>
+<pre><code><span class="comment">// 状态树的主要部分，只画出本课要用的对象。</span>
+GameInfo（存档的根）
+  civilizations → Civilization（每个玩家势力一份）
+                     cities → City（城市自己的数据 + 占有的坐标）
+                     tech / policies / diplomacy ...（文明的事务）
+  tileMap       → TileMap
+                     tileList → Tile（地块全图只存一份，在地图里）
+                     tileMatrix（运行时索引，不写进存档）
+  gameParameters → 开局设置，规则集的名字也在这里
+  turns / currentPlayer → 整局进度
+  (transient) ruleset → 规则定义，读档时按 gameParameters 重新取</code></pre>
+<p class="source">字段依据：<a href="../../core/src/com/unciv/logic/civilization/Civilization.kt">Civilization.kt · cities L211</a><a href="../../core/src/com/unciv/logic/map/TileMap.kt">TileMap.kt · tileList L39</a><a href="../../core/src/com/unciv/logic/city/City.kt">City.kt · L69</a><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">Tile.kt · L44</a></p>
+<aside class="callout tradeoff"><strong>读源码时留意实际依赖</strong><p>状态树描述“谁持有谁”，方便我们找数据，但不代表严格的单向分层。第一课已经看到 <code>GameInfo.nextTurn</code> 接受 UI 进度条参数；反过来，树上的对象也常持有指向根或旁支的运行时引用。遇到交叉调用时以实际代码为准，本课第 3 节会专门看这些引用是怎么补上的。</p></aside>
+</section>
+
+<section id="coords"><h2>2. 城市只记坐标，地块只在地图里</h2>
+<p>先看一个具体问题：玩家查看一座城市，界面要显示中心地块、可工作地块和地块产出。这些地块数据存在哪里？城市的答案很克制：<strong>只记坐标，需要时去地图查</strong>。</p>
+<div class="paired"><div><pre><code><span class="comment">// City 中与本课相关的字段。</span>
+<span class="comment">// 城市自己的位置只存一个坐标。</span>
+var location = HexCoord()
+var id: String = NO_ID
+override var name: String = ""
+
+<span class="comment">// 城市控制的、有人工作的、被锁定的地块，都存坐标集合。</span>
+var tiles = HashSet&lt;HexCoord&gt;()
+var workedTiles = HashSet&lt;HexCoord&gt;()
+var lockedTiles = HashSet&lt;HexCoord&gt;()
+
+<span class="comment">// 运行时才补上的引用和缓存，不写进存档。</span>
+@Transient
+lateinit var civ: Civilization
+@Transient
+private lateinit var centerTile: Tile  <span class="comment">// 缓存，避免每次都查地图</span>
+@Transient
+lateinit var tileMap: TileMap
+@Transient
+lateinit var tilesInRange: HashSet&lt;Tile&gt;</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/city/City.kt">本地 City.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L69">字段 · L69、L103</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L52">transient 引用 · L52</a></p></div><div><p>城市的序列化字段里没有任何地块对象：位置是一个 <code>HexCoord</code>，领土、工作、锁定三套地块都是坐标集合。地块对象本身在地图里，全图只有一份。</p><p><code>tiles</code> 是城市<strong>控制</strong>的地块（领土），<code>workedTiles</code> 是有人<strong>工作</strong>的地块。一块地可以先属于城市，但还没有人口去工作它；这个区别在第 14 课讲人口分配时还会用到。</p><p>运行时字段 <code>centerTile</code>、<code>tileMap</code>、<code>tilesInRange</code> 都是引用和缓存，读档后重新计算，不写进存档。</p></div></div>
+<h3>按坐标查回地块</h3>
+<div class="paired"><div><pre><code><span class="comment">// City.setTransients 的部分代码。</span>
+<span class="comment">// 用保存的坐标从地图找回地块，而不是保存地块对象本身。</span>
+this.civ = civInfo
+tileMap = civInfo.gameInfo.tileMap
+centerTile = tileMap[location]
+state = GameContext(this)
+tilesInRange = getCenterTile().getTilesInDistance(getWorkRange()).toHashSet()
+
+<span class="comment">// 查询城市地块时同样按坐标现查。</span>
+fun getTiles(): Sequence&lt;Tile&gt; =
+    tiles.asSequence().map { tileMap[it] }
+fun getWorkedTiles(): Sequence&lt;Tile&gt; =
+    workedTiles.asSequence().map { tileMap[it] }
+fun isWorked(tile: Tile) = workedTiles.contains(tile.position)</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L404">setTransients · L404、L408</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L211">坐标查询 · L211</a></p></div><div><p><code>tileMap[location]</code> 用 <code>operator get</code> 按坐标取地块。城市保存坐标，访问时查地图；城市和地图之间不复制地块数据。</p><p>修改工作地块时也一样：</p><pre><code><span class="comment">// City 中修改工作地块的部分代码。</span>
+fun workTile(tile: Tile): Boolean {
+    require(getWorkableTiles().contains(tile)) { ... }
+    if (isWorked(tile)) return false
+    workedTiles = workedTiles.withItem(tile.position)
+    return true
+}</code></pre><p>写入集合的是 <code>tile.position</code>，不是地块对象本身。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L387">workTile · L387</a></p></div></div>
+<h3>地图里的地块只有一份</h3>
+<div class="paired"><div><pre><code><span class="comment">// TileMap 中与本课相关的字段。</span>
+var mapParameters = MapParameters()
+var tileList = ArrayList&lt;Tile&gt;(initialCapacity)
+
+<span class="comment">// tileMatrix 是运行时的坐标索引，不写进存档。</span>
+@Transient
+lateinit var gameInfo: GameInfo
+@Transient
+var tileMatrix = ArrayList&lt;ArrayList&lt;Tile?&gt;&gt;()
+
+<span class="comment">// 按坐标取地块：先把坐标换算成矩阵下标。</span>
+operator fun get(x: Int, y: Int) =
+    tileMatrix[x - leftX][y - bottomY]!!
+
+<span class="comment">// Tile 中与本课相关的字段。</span>
+<span class="comment">// 单位、地形、资源等都在这份地块上，全图只此一份。</span>
+var militaryUnit: MapUnit? = null
+var civilianUnit: MapUnit? = null
+var position = HexCoord()
+lateinit var baseTerrain: String
+
+<span class="comment">// 归属城市是运行时引用，扩张或读档时由 setOwningCity 设置。</span>
+@Transient
+var owningCity: City? = null
+    private set
+
+<span class="comment">// 顺着城市找到文明。</span>
+fun getOwner(): Civilization? = getCity()?.civ</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L39">TileMap 字段 · L39、L93</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L222">按坐标取地块 · L222</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L44">Tile 字段 · L44、L128</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L410">getOwner · L410</a></p></div><div><p>地图的序列化字段只有 <code>tileList</code> 等数据；<code>tileMatrix</code> 是运行时按坐标排好的二维索引。源码注释说它比哈希表查得快得多，代价是读档后要重新填充。</p><p>归属关系是反方向的：地块不保存“属于谁”的字符串，而是保存运行时引用 <code>owningCity</code>，指回城市对象。界面想知道地块属于哪个文明时，沿 <code>getOwner() → getCity() → civ</code> 一路找过去。</p><p>这条引用链在扩张领土、读档时由 <code>Tile.setOwningCity</code> 建立，第 3 节会看到它发生在 setTransients 的哪一步。</p></div></div>
+<h3>为什么城市不复制地块？</h3>
+<ol><li><strong>存档不能存对象引用。</strong>地块身上有单位，单位又引用文明和规则集，直接序列化会把整个世界卷进去，还会出现循环引用。存坐标，读档后按坐标找回，链路始终是单向的。</li><li><strong>数据只放一份，才不用同步。</strong>如果城市也存一份地块副本，地图上修路、建改良后，城市手里那份不会跟着变。让地块只在地图里，所有修改都发生在同一个对象上。</li><li><strong>clone 会换掉所有地块对象。</strong>第一课看到每次点“下一回合”都要 clone 整局；<code>TileMap.clone</code> 复制出一批全新的 Tile。若城市保存旧 Tile 的引用，副本里的城市就会指向原地图的地块，结算会改错对象。</li></ol>
+<aside class="callout"><strong>Godot 对照：共享模板与实例数据</strong><p>如果单位、建筑的能力定义放在自定义 <code>Resource</code> 里，多份对象可以共享同一份模板；但“这局游戏里某个单位还剩多少血”是实例数据，得放在每个单位自己的地方。把这两者分开，和 Unciv 把规则集与对局状态分开是同一件事。另外，C# 里把对象图直接 JSON 序列化同样会遇到循环引用，通常也要改成存 ID、坐标，读档后重建。<a href="https://docs.godotengine.org/en/stable/tutorials/scripting/resources.html">Godot 官方 Resource 说明</a>。</p></aside>
+</section>
+
+<section id="transient"><h2>3. 存档存 ID 和名字，运行时引用读档后重建</h2>
+<p>上一节已经出现多处 <code>@Transient</code>。这一节把它们串起来：<strong>跨对象的关系在存档里怎么表示，读档时按什么顺序补上。</strong>先看两种典型写法。</p>
+<div class="paired"><div><pre><code><span class="comment">// City 中“建城者”的两种表示，摘自不同位置。</span>
+<span class="comment">// 存档字段：只保存建城文明的 civID。</span>
+private var foundingCiv = ""
+
+<span class="comment">// 运行时引用：第一次访问时按 civID 从 GameInfo 找回。</span>
+@Transient
+var foundingCivObject: Civilization? = null
+    get() {
+        if (field == null &amp;&amp; foundingCiv.isNotEmpty())
+            field = civ.gameInfo.getCivilization(foundingCiv)
+        return field
+    }
+    set(value) {
+        field = value
+        foundingCiv = value?.civID ?: ""
+    }
+
+<span class="comment">// GameInfo 中胜利信息的两种表示。</span>
+data class VictoryData(
+    val winningCiv: String,  <span class="comment">// 存档：赢家的 civID</span>
+    val victoryType: String,
+    val victoryTurn: Int
+) {
+    @Transient
+    lateinit var winningCivObject: Civilization  <span class="comment">// 运行时引用</span>
+}</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L73">foundingCiv · L73</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L138">foundingCivObject · L138</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L86">VictoryData · L86</a></p></div><div><p>模式很一致：<strong>存档字段保存 ID 或名字，运行时引用用 <code>@Transient</code> 排除，访问或读档时再按 ID 找回。</strong><code>foundingCivObject</code> 的 getter 就是“用到才找”的懒恢复；<code>VictoryData.winningCivObject</code> 则在读档时统一赋值。</p><p>单位的“位置”更彻底——它连坐标都不存在自己身上：</p><pre><code><span class="comment">// MapUnit 中与本课相关的字段。</span>
+<span class="comment">// currentTile 是运行时引用：单位站在哪块地上由 Tile 保存，</span>
+<span class="comment">// 读档时由所在的地块把单位找回，而不是单位另存一份坐标。</span>
+@Transient
+lateinit var currentTile: Tile</code></pre><p>还记得 <code>Tile.militaryUnit</code> 吗？地块保存单位，单位引用地块，这一对关系只在运行时存在；存档里只有“哪个地块上有哪些单位”。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/MapUnit.kt#L136">MapUnit.currentTile · L136</a></p></div></div>
+<h3>常见引用由谁补上</h3>
+<table><thead><tr><th scope="col">@Transient 字段</th><th scope="col">属于</th><th scope="col">读档后由谁补上</th></tr></thead><tbody>
+<tr><td>GameInfo.ruleset</td><td>规则定义</td><td>RulesetCache 按 gameParameters 取</td></tr>
+<tr><td>Civilization.gameInfo / nation</td><td>上下文与规则</td><td>GameInfo.setTransients</td></tr>
+<tr><td>City.civ / tileMap / centerTile</td><td>引用与缓存</td><td>City.setTransients 按坐标查回</td></tr>
+<tr><td>Tile.tileMap / owningCity / ruleset</td><td>引用</td><td>TileMap.setTransients、setNeutralTransients</td></tr>
+<tr><td>MapUnit.currentTile / civ</td><td>位置与归属</td><td>所在 Tile 的 setUnitTransients</td></tr>
+</tbody></table>
+<h3>setTransients 的顺序就是重建的顺序</h3>
+<div class="paired"><div><pre><code><span class="comment">// GameInfo.setTransients 的主要顺序（部分代码，</span>
+<span class="comment">// 省略了旧存档兼容和模组名处理）。</span>
+tileMap.gameInfo = this  <span class="comment">// 先让地图认识这局游戏</span>
+ruleset = RulesetCache.getComplexRuleset(gameParameters)
+
+for (civInfo in civilizations) civInfo.gameInfo = this
+for (civInfo in civilizations) civInfo.setNationTransient()
+
+tileMap.setTransients(ruleset)  <span class="comment">// 填坐标索引，重建地块的运行时数据</span>
+for (civInfo in civilizations) civInfo.setTransients()
+    <span class="comment">// 其中城市按坐标找回地块</span>
+tileMap.setNeutralTransients()  <span class="comment">// 补上地块与城市的归属关系</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/GameInfo.kt">本地 GameInfo.setTransients</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L710">入口 · L710</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L736">规则集 · L736</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L773">地图与文明 · L773、L792</a></p></div><div><p>顺序不能乱：城市要用地图查地块，所以 <code>tileMap.setTransients</code> 先执行；地块的邻居缓存依赖坐标索引，所以索引要先填满；<code>setNeutralTransients</code> 处理无主地块的道路归属，要等文明和城市都就位。原方法里每段之间都有“必须在 X 之前”的注释，读的时候值得留意。</p><p><code>City.setTransients</code> 里那句 <code>centerTile = tileMap[location]</code> 就发生在这个过程的文明循环中。这也是第一课 <code>clone → setTransients</code> 的真相：<strong>clone 复制数据，setTransients 重建引用</strong>。副本里的城市坐标不变，但 <code>centerTile</code> 指向副本自己地图里的新地块。</p><p>例外的复制方式：第一课提过 <code>gameParameters</code> 在 clone 时只复制引用；类似地，<code>City.clone</code> 里 <code>toReturn.tiles = tiles</code> 直接共享坐标集合——坐标是值语义的小对象，共享没关系，真正的地块对象由 <code>TileMap.clone</code> 重新复制。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L199">TileMap.clone · L199</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/City.kt#L174">City.clone · L174</a></p></div></div>
+<aside class="callout"><strong>生产经验：惰性缓存和初始化顺序</strong><p><code>TileMap.setTransients</code> 先把所有地块填进 <code>tileMatrix</code>，再逐个设置地块的运行时数据。源码注释解释了这个细节：地块的 <code>neighbors</code> 是 <code>by lazy</code> 缓存，第一次访问就会固定下来；如果边填矩阵边初始化，某个地块可能趁索引还没填完就计算邻居，缓存到一份不完整的邻居列表。这类“惰性缓存 + 初始化顺序”的坑在游戏数据里很常见：缓存要慢，重建它必须完整。<a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L611">相关源码 · L611</a>。</p></aside>
+</section>
+
+<section id="view"><h2>4. 同一个世界，不同的观察视角</h2>
+<p>数据归好位之后，还差一层：<strong>谁能看到什么、能做什么。</strong>Unciv 的做法是给状态包上“视角”（View）。<code>View</code> 类的文档注释把意图说得很直接：</p>
+<div class="paired"><div><pre><code><span class="comment">// View 的文档注释要点（View.kt）。</span>
+<span class="comment">// View 是玩家能拿到的 API：只提供该玩家有权访问的数据和操作。</span>
+<span class="comment">// 所有 UI 代码应只通过 View 使用游戏状态。</span>
+open class View&lt;T&gt;(protected val wrapped: T,
+                   protected open val viewer: Civilization?,
+                   val spectatorMode: Boolean = false)
+
+<span class="comment">// GameView：从 viewer 文明的视角看一局游戏。</span>
+class GameView(gameInfo: GameInfo, viewer: Civilization, ...) {
+    val civView = CivView(viewer, viewer, ...)
+    val tileMapView = TileMapView(gameInfo.tileMap, viewer, ...)
+
+    <span class="comment">// 用不同对象包装同一份状态，数据没有复制。</span>
+    fun getCityView(city: City) = CityView(city, viewer, ...)
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/view/View.kt">本地 View.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/view/View.kt#L6">文档注释 · L6</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/view/GameView.kt#L11">GameView · L11</a></p></div><div><p>创建 <code>GameView</code> 时会传入 <code>viewer</code>——当前观察者是谁。之后所有查询都从这个文明的角度回答。界面持有它：</p><pre><code><span class="comment">// WorldScreen 中与本课相关的字段。</span>
+val gameInfo: GameInfo  <span class="comment">// 这局游戏的状态（第一课）</span>
+var selectedGameView =
+    GameView(gameInfo, selectedCiv, spectatorMode = ...)
+<span class="comment">// 界面组件从 selectedGameView 取数据。</span></code></pre><p><code>selectedCiv</code> 在普通游戏里就是玩家文明；观战或回放时可以切换，<code>spectatorGameView</code> 则始终是观战者自己不受战争迷雾限制的视角。同一份 <code>gameInfo</code> 上可以有多个视角。</p><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/WorldScreen.kt#L91">WorldScreen 字段 · L91、L112</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/WorldScreen.kt#L117">观战视角 · L117</a></p></div></div>
+<p>视角最明显的作用是过滤。看地块视角里的单位：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileView 的部分代码。</span>
+<span class="comment">// 地块上有单位，不等于当前玩家看得见它：</span>
+<span class="comment">// 对 viewer 不可见的单位返回 null。</span>
+val militaryUnit: ForeignMapUnitView?
+    get() {
+        val unit = tile.militaryUnit ?: return null
+        if (!isVisible(unit)) return null
+        return toForeignMapUnitView(unit)
+    }
+
+<span class="comment">// 底层 Tile 的可见性判定：</span>
+<span class="comment">// 正在被观测的地块，是文明缓存的可见集合里的地块。</span>
+fun isVisible(player: Civilization): Boolean =
+    player.viewableTiles.contains(this)</code></pre><p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/view/TileView.kt#L58">TileView 过滤 · L58</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L308">Tile.isVisible · L308</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/Civilization.kt#L101">viewableTiles · L101</a></p></div><div><p><strong>状态里存在，不等于视角里可见。</strong>敌方单位始终在 <code>tile.militaryUnit</code> 上；但 <code>TileView.militaryUnit</code> 会先检查它对 <code>viewer</code> 是否可见，不可见就返回 null。战争迷雾就是这样实现的：不是把单位藏起来，而是视角层不给你。</p><p><code>viewableTiles</code> 是文明上的 <code>@Transient</code> 缓存集合，由单位移动、视野计算等环节重算。缓存本身不算对局状态，读档后要重建——这正是第 3 节那张表里的一行。谁在什么时候重算它，第 12 课讲地图显示时再追。</p><p>视角还约束操作：<code>CivView</code> 里修改状态的方法都以 <code>try</code> 开头、返回 <code>Boolean</code> 表示是否成功，例如 <code>tryDisableCivConstruction</code>；查询方法则标了 <code>@Readonly</code>。改数据的入口和读数据的入口被有意分开。</p></div></div>
+<p>回到第一课的概念：<code>GameInfo</code> 是“已经发生什么”，<code>WorldScreen</code> 是“屏幕上显示什么”，中间隔着 <code>GameView</code>——“这个玩家能知道什么”。第一课的状态/规则/推进/视角四栏表里，“视角与显示”那一行，本课补上了它的一半：视角。画面图层（TileGroup 等）是另一半，第 12 课再讲。</p>
+<aside class="callout"><strong>排查思路：先分清“状态有没有”和“视角看不看得到”</strong><p>以后遇到“单位不见了”“地块信息不显示”，先问两件事：状态里真的存在吗（直接看 <code>Tile.militaryUnit</code> 等字段）；视角允许看吗（<code>viewer.viewableTiles</code>、<code>isExplored</code>）。两边都确认过，再去查界面组件有没有创建对应的画面元素。跳过视角直接改界面，常常是白忙。</p></aside>
+</section>
+
+<section id="classify"><h2>5. 三类数据与取舍</h2>
+<p>把前四节收拢成一张分类表。以后每见到一个字段，先判断它属于哪一类，保存方式和重建责任就都清楚了。</p>
+<table><thead><tr><th scope="col">类别</th><th scope="col">例子</th><th scope="col">保存方式</th><th scope="col">本课要点</th></tr></thead><tbody>
+<tr><td>对局状态</td><td>GameInfo.turns、City.location、Tile.baseTerrain、Civilization.gold</td><td>写进存档</td><td>挂在 GameInfo 这棵树上，只存 ID、坐标、数值</td></tr>
+<tr><td>规则定义</td><td>Ruleset：地形、建筑、单位模板</td><td>不写进存档</td><td>按 gameParameters 取；第 3 课展开</td></tr>
+<tr><td>运行时引用与缓存</td><td>civ、centerTile、owningCity、tileMatrix、viewableTiles</td><td>@Transient</td><td>setTransients 按 ID、名字、坐标重建</td></tr>
+</tbody></table>
+<p>拿到一个字段时问三句：<strong>它写进存档吗？改它要不要同步别处？读档后谁负责补上？</strong>回答不了第三句，就说明还没找到它的重建入口。</p>
+<aside class="callout tradeoff"><strong>设计取舍：为什么不干脆都存引用？</strong><p>直接引用省了“查表”这一步，但有三笔账：序列化时要处理重复和循环引用；修改可能发生在副本上，旧引用会悄悄指向错的对象；同一份数据放两处就要维护同步。Unciv 的选择是“存键、查表、热门路径用缓存”：坐标和 ID 是键，<code>tileMatrix</code>、<code>centerTile</code>、<code>neighbors</code> 是缓存。缓存换来了速度，代价是必须跟着状态重建——这也是引用类 bug 的高发区。什么时候可以直接引用？纯运行时结构、生命周期一致、不进存档的对象，比如 <code>GameContext</code>、各种管理器、View 包装。第一课 clone 时 <code>gameParameters</code> 共享引用，就是这个取舍的另一面：判断哪些对象“改了也无所谓”，哪些必须复制。</p></aside>
+<aside class="callout"><strong>Godot 对照：数据、模板与画面三层</strong><p>Unciv 的这套分类可以平移到 Godot 4 C#：<strong>对局状态</strong>用普通 C# 对象保存，不一定要挂 Node；<strong>规则模板</strong>用共享的 <code>Resource</code>，注意改模板会影响所有引用者；<strong>画面与交互</strong>交给节点，节点只负责“呈现视角允许看到的数据”。存档时同样把状态写成 ID、坐标和数值，读档后重建对象引用。差异在于 Godot 的节点树自带生命周期和信号，而 Unciv 的对象树要靠 setTransients 手动重建——第 25、28 课会回到这个话题。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>GameInfo 是存档的根：文明、地图等状态都挂在它下面；规则集和运行时引用不写进存档。</strong></li><li><strong>城市只保存坐标和自己的数据；地块全图只存一份，城市按坐标查回地块。</strong></li><li><strong>归属关系靠运行时引用：Tile.owningCity 指向城市，再沿 civ 找到文明。</strong></li><li><strong>跨对象的引用在存档里写成 ID、名字、坐标，读档后由 setTransients 按顺序重建。</strong></li><li><strong>clone 复制数据，setTransients 重建引用；副本里的城市坐标不变，但指回副本自己的地图。</strong></li><li><strong>状态存在不等于视角可见：GameView 按 viewer 过滤数据，界面通过视角拿东西。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；能自己画出状态树、推演读档流程，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="c"><fieldset><legend>1. 城市怎样找到自己所在的地块？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="城市只存 location 等坐标，没有自己的地块副本；看看 City 的字段和 setTransients。"><span>城市复制一份地块数据</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="地块对象不写进存档，clone 时也会换新；City.setTransients 里是按坐标查的。"><span>城市保存地块对象引用</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="location 是 HexCoord；centerTile = tileMap[location]，getTiles 也是按坐标现查。"><span>城市保存坐标再查地图</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="是地图里的 Tile 引用城市（owningCity），方向反了；城市自身用坐标找地块。"><span>地块保存城市对象引用</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>2. 地块怎样知道自己的归属文明？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="owningCity 是运行时引用，Tile.getOwner() = getCity()?.civ，沿城市找到文明。"><span>通过地块上的城市查找</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="归属关系是运行时补上的 owningCity 引用，不是地块上的文明编号字段。"><span>地块保存文明编号字段</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="文明不保存领土清单；领土由地块指向城市，再由城市指向文明。"><span>文明保存全部地块列表</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="没有这样的全局变量；跟着 getOwner 的调用链看实际查法。"><span>通过地图全局变量查找</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>3. @Transient 字段的共同点是什么？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="它们不写进存档；setTransients 按保存的 ID、名字、坐标重建这些引用。"><span>读档之后重新补上</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="@Transient 只控制序列化时忽略字段，不会在存档前自动清空。"><span>存档之前先被清空</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="很多 transient 字段是 lateinit 的引用和缓存，读档后会赋值，不是默认值。"><span>永远保持默认数值</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="ruleset 只是其中一个例子；civ、centerTile、tileMatrix 等引用也都是 transient。"><span>只存在于规则文件</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="b"><fieldset><legend>4. GameView 与 GameInfo 是什么关系？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="View 包装同一个 GameInfo，不复制状态；复制整局发生在 clone（第一课）。"><span>复制并保存一局新游戏</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="GameView 包装 GameInfo，带着 viewer 文明；TileView 会过滤不可见的数据。"><span>从选定文明的视角查询</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="应用设置和存档归 UncivGame、UncivFiles 管，不在 GameView。"><span>管理应用的设置与存档</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="地图生成是 MapGenerator 的事；GameView 只提供查询。"><span>生成地图上所有六边形</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：城市保存坐标再查地图；2：通过地块上的城市查找；3：读档之后重新补上；4：从选定文明的视角查询。分别对应 <a href="#coords">坐标存储</a>、<a href="#coords">归属引用</a>、<a href="#transient">运行时引用</a>、<a href="#view">观察视角</a>。</p></details>
+<h3>练习 A · 重画状态树（3 分钟）</h3><p>不看正文，画出 GameInfo → Civilization → City → TileMap → Tile 的持有关系，并在每条边上标注“序列化字段”还是“运行时引用”。</p><details class="rubric"><summary>展开核对要点</summary><pre><code>GameInfo ──civilizations(存档)── Civilization ──cities(存档)── City
+GameInfo ──tileMap(存档)── TileMap ──tileList(存档)── Tile
+City ──location/tiles(坐标，存档)……查回→ tileMap[坐标] → Tile（运行时）
+City ──civ── Civilization（运行时）
+Tile ──owningCity── City（运行时）</code></pre><p>两条存档链、三条运行时边都要画对。城市与地块之间没有直接的序列化引用，靠坐标接起来；漏了这条就回到 <a href="#coords">第 2 节</a>。</p></details>
+<h3>练习 B · 读档后城市怎么找回地块（4 分钟）</h3><p>新建一局、存档、读档。读档刚结束时，<code>City.centerTile</code> 能访问吗？它是在哪个方法的哪一步被赋值的？如果存档里 <code>location</code> 被改成了地图外坐标，读档会发生什么？</p><details class="rubric"><summary>展开答案与分析</summary><p>反序列化只填序列化字段，<code>centerTile</code> 尚未初始化。重建顺序是 GameInfo.setTransients → Civilization.setTransients → City.setTransients，其中 <code>centerTile = tileMap[location]</code>。坐标越界时，<code>tileMatrix[x - leftX][y - bottomY]!!</code> 会拿到 null 或数组越界，读档直接报错——坐标字段必须保持有效，这也是旧版本迁移要检查坐标的原因（第 25 课展开）。能说出赋值位置和失败方式，说明理解了“存坐标、读档重建”的完整链路。</p></details>
+<h3>练习 C · 一份数据还是两份（4 分钟）</h3><p>假设把 <code>City.tiles</code> 改成保存 <code>Tile</code> 对象引用，并让存档跟着把地块写进城市。举出三个具体会出问题的场景，每个场景对应本课哪一节的哪个原因。</p><details class="rubric"><summary>展开核对要点</summary><p>① 存档重复：同一块地在地图和城市各写一遍，文件变大且两处可能不一致（第 2 节“存档不能存对象引用”）；② clone 失效：第一课每次点下一回合都 clone 整局，旧 Tile 引用会指向原地图的地块，副本里的城市改错对象（第 2 节“clone 会换掉所有地块对象”）；③ 修改不同步：地图上修路、建改良后城市手里那份不更新，必须维护同步逻辑（第 2 节“数据只放一份”）。结论：存坐标加查表，让数据只有一份，重建成本集中由 setTransients 承担。</p></details>
+<h3>练习 D · 为什么这块地显示没有单位（选读，3 分钟）</h3><p>调试时看到 <code>tile.militaryUnit</code> 非空，但界面上该地块没有显示单位。列出两个可能的原因，并给出对应的源码位置。</p><details class="rubric"><summary>展开核对要点</summary><p>① 单位对当前 viewer 不可见：<code>TileView.militaryUnit</code> 里先检查 <code>isVisible(unit)</code>，依赖 <code>viewer.viewableTiles</code>（TileView.kt L58、Tile.kt L308）；② 拿错了视角：观战或回放时界面用的是 <code>selectedGameView</code>，它按 selectedCiv 过滤，与“全知”的 <code>spectatorGameView</code> 不同（WorldScreen.kt L112、L117）。关键结论：状态里存在和视角里可见是两回事，排查顺序是先状态、后视角、再界面。</p></details>
+<h3>选读练习 · 第一课回顾（1 分钟）</h3><p>第一课选读里，<code>PlayTurnAsync</code> 创建一段 Tween 后立即返回 <code>Task.CompletedTask</code>，外层已经写了 <code>await</code>，能保证动画播完才轮到下一位玩家吗？</p><details class="rubric"><summary>展开答案</summary><p>不能。await 到一个已经完成的 Task 会立即继续执行；返回的 Task 必须对应这次动画的完成，例如等待 Tween 的 Finished 信号。判断关键是“这个 Task 在什么时刻完成”，而不是代码里有没有写 await。详见<a href="0001-runtime-map.html#turn-presentation">第一课选读</a>。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L710">GameInfo.setTransients</a>。从 <code>tileMap.gameInfo = this</code> 往下读，找出地图、文明、城市各在什么时候补上引用；然后进 <a href="../../core/src/com/unciv/logic/city/City.kt">City.setTransients</a>，核对 <code>centerTile = tileMap[location]</code> 的位置。最后扫一眼 <a href="../../core/src/com/unciv/view/GameView.kt">GameView</a> 和 <a href="../../core/src/com/unciv/view/TileView.kt">TileView</a>，感受视角层如何过滤。</p><p>下次学习前，用两分钟重画练习 A；约一周后再做练习 B 和 C。如果记得字段名却说不出谁补上它，翻一下<a href="reference/architecture.html#data">状态树与三类数据速查</a>，弄清卡住的地方后合上资料再试一次。</p><p>有不清楚的步骤，可以直接问教学助手。说说你读到了哪个方法、现在怎么理解、哪里想不通，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="reference/architecture.html">架构与术语速查</a><a href="0003-rule-pipeline.html">下一课：一条规则怎样进入游戏</a></div></section>
+<footer>资料核对：2026-09-10。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。</footer>
+</main></div>
+</body>
+</html>

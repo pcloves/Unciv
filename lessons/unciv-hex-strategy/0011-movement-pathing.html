@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>11 · 移动代价与寻路 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>11 / 移动代价与寻路</strong><a href="#goal">目标、回顾与场景</a><a href="#cost">1. 一步多少钱：代价的五个来源</a><a href="#reach">2. 这一回合能到哪：可达图</a><a href="#path">3. 跨回合的最短路：路径</a><a href="#engine">4. 引擎：A* 与两代实现</a><a href="#tradeoffs">5. 约束与取舍</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第 05、06 课<br>含源码走读与推演练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第二阶段 / 地图专题 · 地图的使用第一课</div>
+<h1>移动代价与寻路</h1>
+<p class="lead">地图生成专题（07～10 课）到上一课为止：地图上有了地形、山川、河流、起点和资源，但它是静态的。从这一课起转向“地图怎么被使用”——最先碰它的就是单位移动。选中一个单位时界面高亮的那些格子、点远处一格时单位脚下出现的路线，背后是同一套问答：<strong>从这格到那格要花多少移动力？哪些格子根本走不过去？跨很多回合时哪条路最省？</strong>读完你应当能拿一张小地图，亲手推演出一个单位的可达范围和一条最短路径。</p>
+<p class="meta">需要的基础：第五课的邻居偏移表与 getDistance（寻路的“一步”就是邻居）、zeroBasedIndex（寻路缓存的数组下标）；第六课的地形/特征分层（movementCost 查的是 lastTerrain，即特征压过基础地形）。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>三个场景都来自玩一局的操作。场景一：选中一个还有 2 移动力的勇士，界面把周围一部分格子标成高亮——为什么高亮到某圈为止、有的近格反而不亮？这是第 2 节的可达图。场景二：让工人从首都走到 20 格外的分城，单位不是沿直线爬过去，而是拐了个弯——它绕开的是什么、在省什么？这是第 3 节的跨回合路径。场景三：同一条路，没发明机器前每格 0.5 移动力、发明后变 0.33，铁路则是 0.1——为什么寻路器要为这些小数专门换一套整数算术？这是第 1 节的代价表与第 4 节的定点数。</p>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>代价：</strong>走一步的移动力由哪几层决定？100f 这个特殊值是什么意思？</li><li><strong>可达：</strong>“这回合能到哪”与“能不能停在这”为什么是两个问题？</li><li><strong>路径：</strong>跨回合寻路优化的是移动点总和还是回合数？两条算法线怎么分工？</li></ul><p>读完还要会一件事：不看正文，在一张纸上画出 3～4 格的小地图，标出移动力 2 的单位一回合能到的所有格子，并对“为什么某格到不了”给出源码依据。</p></div><div><h3>口述回顾：第七～十课</h3><ol><li>第七课：generateMap 的十条阶段链里，谁排在最前（地形先有谁后有谁）？新游戏与编辑器分支的判定条件是什么？</li><li>第八课：一个噪声值是怎么从 permutation 表一步步算出来的？fade 的作用是什么？</li><li>第九课：山的阈值 0.7 与丘的 0.5 比的是哪个数（幂前还是幂后）？河流的三布尔存在哪一侧的格子上？</li><li>第十课：区域按什么量切分？起点评价的三个下限查的是累计值还是单环值？</li></ol><p>这四条是地图生成专题的收束，答不上的回对应课扫一眼再往下读；第 05、06 课的邻居表与地形分层是本课的活地基，默认已熟。</p><p class="source"><a href="0007-map-generation.html">第七课：地图生成流水线</a><a href="0008-landmass-climate.html">第八课：陆海与气候分布</a><a href="0009-elevation-rivers.html">第九课：山地与河流</a><a href="0010-starts-resources.html">第十课：可玩的出生地与资源</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>代价的五个来源</td><td>15 分钟</td><td>铁路/道路/地形/双倍移动/100f 的判定顺序</td></tr><tr><td>可达图</td><td>12 分钟</td><td>getMovementToTilesAtPosition 的松弛过程与“能过不能停”</td></tr><tr><td>跨回合路径</td><td>12 分钟</td><td>getShortestPath 的回合树与“先止损后走远”</td></tr><tr><td>A* 引擎与两代实现</td><td>10 分钟</td><td>PathingMap/RouteNode 缓存、启发式与两算法的取舍</td></tr></tbody></table>
+</section>
+
+<section id="cost"><h2>1. 一步多少钱：代价的五个来源</h2>
+<p>寻路的一切都建立在“一步多少代价”上。这里的一步，指<strong>从一格走进相邻的六格之一</strong>——第五课的邻居偏移表给出六个方向，本课给每个方向标价。代价查询的总入口是 <code>MovementCost.getMovementCostBetweenAdjacentTiles</code>，它按固定顺序过一遍所有规则，先命中先返回：</p>
+<div class="paired"><div><pre><code><span class="comment">// MovementCost.getMovementCostBetweenAdjacentTiles（部分代码）。问：走一步收多少钱？</span>
+fun getMovementCostBetweenAdjacentTiles(
+    unit: MapUnit, from: Tile, to: Tile, ...
+): Float {
+    if (unit.cache.cannotMove) return 100f                        <span class="comment">// ① 不能动：标价 100</span>
+
+    if (from.isLand != to.isLand &amp;&amp; unit.baseUnit.isLandUnit
+        &amp;&amp; !unit.cache.canMoveOnWater)
+        return if (from.isWater &amp;&amp; to.isLand)
+            unit.cache.costToDisembark ?: 100f                     <span class="comment">// ② 登陆/上船花光</span>
+        else unit.cache.costToEmbark ?: 100f
+
+    if (considerZoneOfControl &amp;&amp;
+        isMovementAffectedByZoneOfControl(unit, from, to))
+        return 100f                                                <span class="comment">// ③ 控制区：花光</span>
+
+    if (unit.cache.allTilesCosts1) return 1f                       <span class="comment">// ④ 全图代价 1 的单位</span>
+
+    val extraCost = ...                                            <span class="comment">// ⑤ 敌方移动惩罚，先记着</span>
+
+    if (from.getUnpillagedRoad() == RoadStatus.Railroad
+        &amp;&amp; to.getUnpillagedRoad() == RoadStatus.Railroad)
+        return RoadStatus.Railroad.movement + extraCost            <span class="comment">// ⑥ 两端铁路：0.1</span>
+
+    val areConnectedByRoad = from.hasConnection(civ) &amp;&amp; to.hasConnection(civ)
+    ...
+    if (areConnectedByRoad &amp;&amp; (!areConnectedByRiver
+        || civ.tech.roadsConnectAcrossRivers))
+        return civ.tech.movementSpeedOnRoads + extraCost           <span class="comment">// ⑦ 道路：0.5 或 1/3</span>
+
+    if (unit.cache.ignoresTerrainCost) return 1f + extraCost       <span class="comment">// ⑧ 无视地形</span>
+    if (areConnectedByRiver) return 100f                           <span class="comment">// ⑨ 涉河无路：花光</span>
+
+    val terrainCost = if (to.isCityCenter()) 1f
+        else to.lastTerrain.movementCost.toFloat()                 <span class="comment">// ⑩ 地形代价</span>
+    ...
+    if (to.terrainFeatures.any { hasDoubleMovement(unit, it, ...) })
+        return terrainCost * 0.5f + extraCost                      <span class="comment">// ⑪ 双倍移动减半</span>
+
+    ...
+    return terrainCost + extraCost                                 <span class="comment">// ⑫ 兜底：地形原价</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapunit/movement/MovementCost.kt">本地 MovementCost.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/movement/MovementCost.kt#L40">getMovementCostBetweenAdjacentTiles · L40</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/RoadStatus.kt#L13">RoadStatus · RoadStatus.kt L13</a></p></div><div><p>这段像一个<strong>收费站层层设卡</strong>的脑内模型：从特殊状态查起（不能动、上下船、控制区），再按“路优先于地形”的顺序逐层放行，任何一层报出价来就直接返回，后面不再看。</p><p>① <code>cannotMove</code> 是单位级缓存（ fortified 之类状态之外的各种“这回合动不了”），直接标 100。100f 不是精确价格，而是一个<strong>“大到等于花光全部”</strong>的哨兵值——移动力再高的单位也不会超过几十，100 确保这一步在比较时永远最差。后面 ③⑨ 的 100f 同理。</p><p>② 陆地单位水陆切换（上船/下船）默认也花光；只有规则给了折扣（costToEmbark/costToDisembark）才便宜。 embark 译作“登船”，disembark 译作“登陆”。</p><p>③ <strong>控制区（Zone of Control，ZoC）</strong>：敌方军事单位与敌城压着周围六格，在它的阴影里“从一格挪到另一格”直接花光全部移动力。判定只看 from 和 to 的公共邻居里有没有压着的敌人（anyTilesExertingZoneOfControl），海军的 ZoC 对陆海都生效。</p><p>④ 带 “All tiles cost 1 move” 类 unique 的单位（如侦察兵升级）全图每格代价 1，路都不看。</p><p>⑤ extraCost 是敌国领土对敌军的额外加价（“Enemy units spend extra movement”），先算好、之后每层出口都带上它。</p><p>⑥ <strong>铁路</strong>要求两端都是未劫掠的铁路格，0.1 一格——这是全游戏最快的路。注意用的是 <code>movement</code> 而非 <code>movementImproved</code>（后者 1/3，是给“道路升级到铁路”的寻路提示用的，第 4 节会见到）。</p><p>⑦ <strong>道路</strong>：两端都在 <code>hasConnection(civ)</code> 的路网上，且要么不涉河、要么研究了“道路跨河”科技，价格取 <code>civ.tech.movementSpeedOnRoads</code>——默认 0.5，研究机器（Machinery，挂 RoadMovementSpeed）后变 1/3。注意这个字段是<strong>文明的</strong>而非单位的：全文明共享道路速度。</p><p>⑧ “Ignores terrain cost” 单位（如 Scouter）按每格代价 1 走，不吃森林丘陵的加价。</p><p>⑨ <strong>渡河</strong>：from 与 to 隔一条河（第九课的河流边存储在这是判定依据）且没有跨河道路——整个回合花光。这就是“贴着河的格子难打”在移动层的体现。</p><p>⑩ 地形代价查 <code>to.lastTerrain.movementCost</code>——lastTerrain 是第六课讲过的“最顶层地形”：有特征取特征（Hill 2、Forest 2、Jungle 2、Marsh 3），否则取基础地形（草原/平原/沙漠/冻土/雪原都是 1）。城市中心按代价 1 算。REPL 实测（G&K 规则集）：代价不是 1 的只有 Hill 2、Forest 2、Jungle 2、Marsh 3、Fallout 2。</p><p>⑪ <strong>双倍移动</strong>（Double movement in [terrain]）把地形价砍半，如森林里的弓手升级。按特征、基础地形、过滤符三层各查一遍（此处只列特征层）。</p><p>⑫ 兜底：地形原价 + 敌境加价。整段的关键是<strong>顺序</strong>：铁路 &gt; 道路 &gt; 双倍移动 &gt; 地形，且特殊状态（不能动、ZoC、渡河）永远优先压住一切。</p></div></div>
+<p>把这条判定链折成一张速查表（默认普通陆地单位、无特殊 unique，REPL 实测）：</p>
+<table><thead><tr><th scope="col">一步的情况</th><th scope="col">代价</th><th scope="col">依据</th></tr></thead><tbody>
+<tr><td>两端铁路</td><td>0.1</td><td>RoadStatus.Railroad.movement</td></tr>
+<tr><td>道路连接（无机器）</td><td>0.5</td><td>civ.tech.movementSpeedOnRoads 默认值</td></tr>
+<tr><td>道路连接（研究机器后）</td><td>1/3</td><td>RoadMovementSpeed unique 改写字段</td></tr>
+<tr><td>平地一步（草原/平原/沙漠/冻土/雪原）</td><td>1</td><td>基础地形 movementCost</td></tr>
+<tr><td>丘陵/森林/丛林一步</td><td>2</td><td>特征的 movementCost</td></tr>
+<tr><td>沼泽一步</td><td>3</td><td>同上</td></tr>
+<tr><td>登陆或上船（无折扣 unique）</td><td>花光</td><td>costToEmbark/costToDisembark 为空 → 100f</td></tr>
+<tr><td>渡河（无跨河道路）</td><td>花光</td><td>areConnectedByRiver → 100f</td></tr>
+<tr><td>踩敌方控制区移动</td><td>花光</td><td>ZoC → 100f</td></tr>
+</tbody></table>
+<aside class="callout"><strong>Godot 对照：代价函数就是“边的权重”</strong><p>这套判定链在你的游戏里就是邻接图的边权函数：输入 (from, to, unit, 全局状态)，输出一个非负数。Unciv 的可借鉴点是<strong>把规则放进数据、把顺序写死在代码里</strong>——movementCost 存在 Terrains.json、道路速度存在科技 unique 里，代价函数只负责按优先级组合。Godot 4.x 里把单位移动做成 AStar2D/AStarGrid2D 时，<code>_compute_cost</code> 回调正好放这条链；哨兵值 100f 的技巧（用超大代价表示“事实上的不可行”）在引擎自带的 A* 里同样可用，比抛异常省心。注意 Godot 的 AStarGrid2D 是方格的，六边形要么用 AStar2D 自建点集，要么用 Polygon（第 28 课会汇总比较）。</p></aside>
+</section>
+
+<section id="reach"><h2>2. 这一回合能到哪：可达图</h2>
+<p>知道每步的价格，就能算“这回合能到哪”。老实现（当前默认设置仍在用）是一个<strong>按层松弛</strong>的过程，入口 <code>UnitMovement.getMovementToTilesAtPosition</code>；A* 新实现（第 4 节）语义相同。先看老实现，因为它把语义讲得最直白：</p>
+<div class="paired"><div><pre><code><span class="comment">// UnitMovement.getMovementToTilesAtPosition（部分代码）。问：还剩 2 点力，能到哪些格？</span>
+val distanceToTiles = PathsToTilesWithinTurn()
+distanceToTiles[unitTile] = ParentTileAndTotalMovement(unitTile, unitTile, 0f)   <span class="comment">// ① 起点代价记 0</span>
+if (unitMovement == 0f || unit.cache.cannotMove) return distanceToTiles          <span class="comment">// ② 没力：只剩起点</span>
+
+var tilesToCheck = listOf(unitTile)
+while (tilesToCheck.isNotEmpty()) {                          <span class="comment">// ③ 一轮处理一层</span>
+    val updatedTiles = ArrayList&lt;Tile&gt;()
+    for (tileToCheck in tilesToCheck) {
+        val tileToCheckMovement = distanceToTiles[tileToCheck]!!.totalMovement
+        for (neighbor in tileToCheck.neighbors) {
+            var totalDistanceToTile: Float = when {
+                !neighbor.isExplored(unit.civ) -&gt;
+                    tileToCheckMovement + 1f                  <span class="comment">// ④ 迷雾格猜作平地（代价 1）</span>
+                !canPassThroughCache.getOrPut(neighbor.zeroBasedIndex) {
+                    canPassThrough(neighbor) } -&gt; unitMovement    <span class="comment">// ⑤ 过不去：标满价</span>
+                else -&gt; {
+                    val movementCost = movementCostCache.getOrPut(key) {
+                        MovementCost.getMovementCostBetweenAdjacentTilesEscort(...) }
+                    tileToCheckMovement + movementCost        <span class="comment">// ⑥ 正常计价</span>
+                }
+            }
+            val currentBestPath = distanceToTiles[neighbor]
+            if (currentBestPath == null
+                || currentBestPath.totalMovement &gt; totalDistanceToTile) {   <span class="comment">// ⑦ 松弛：找到更便宜的路</span>
+                if (totalDistanceToTile &lt; usableMovement - Constants.minimumMovementEpsilon)
+                    updatedTiles += neighbor                 <span class="comment">// ⑧ 还有富余：继续从这扩散</span>
+                else
+                    totalDistanceToTile = usableMovement      <span class="comment">// ⑨ 超了：钉在满价</span>
+                distanceToTiles[neighbor] =
+                    ParentTileAndTotalMovement(neighbor, tileToCheck, totalDistanceToTile)
+            }
+        }
+    }
+    tilesToCheck = updatedTiles
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt">本地 UnitMovement.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt#L67">getMovementToTilesAtPosition · L67</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt#L1006">PathsToTilesWithinTurn · L1006</a></p></div><div><p>脑内模型是<strong>水波扩散</strong>：从起点荡开一圈圈涟漪，每个格子记录“到我这里最便宜的累计水花”；只要还有富余移动力，涟漪就继续往外传。</p><p>① 起点自己记代价 0，父格指向自己——这是后面回溯路径的终止条件。</p><p>② 移动力为 0 或缓存说不能动，直接返回只有起点的表。注意两个容易混的判定：<code>canMoveTo</code>（能不能<strong>停</strong>在这）与 <code>canPassThrough</code>（能不能<strong>路过</strong>这里）是两回事——友方单位的格子能路过不能停（除非换位），敌城不能停但攻击目标格要标成“可达”才能被选中。</p><p>③ 外层 while 一轮处理“上一轮新解锁的格子”，像 BFS 按层推进；但每格的 totalMovement 是<strong>真实代价累加</strong>，不是层数，所以丘陵那边的“层”传得近、平地那边传得远。</p><p>④ 迷雾里的格子一律猜作代价 1——玩家没见过它的真实地形，就当是平地。半路撞上山再修正，moveToTile 里有对应的中断重算。</p><p>⑤ <code>canPassThrough</code> 过不去的格子（敌军占着、封闭国境、不可通行地形）标成 unitMovement 满价——注意不是不记录！源码注释点明原因：算“怎么打到敌人”时必须假设敌人那格可达，否则所有攻击寻路都会失灵。所以满价是“这格算你能到，但到了就别想再走”。</p><p>⑥ 正常情况查第 1 节的代价函数。Escort 版本会取单位与其护卫（escort，两两绑定的成对单位，如工人+勇士）中更贵的那个价——一对人马按腿短的那条腿走。</p><p>⑦ 松弛：如果这次算出的累计价比已记录的便宜，就更新。同一格可能从多个方向被触及，留下最便宜的方向作为 parent。</p><p>⑧ 还有富余（差值大于浮点容差 minimumMovementEpsilon）的格子进下一轮扩散。</p><p>⑨ 超预算的格子<strong>仍然记录</strong>，但价格钉在 usableMovement——这就是“ Civ V 里哪怕只剩 0.1 移动力，相邻一格也能挤过去、然后力尽”的实现：格子有记录（可点），价格显示为满。usableMovement 是自己与护卫移动力取小后的可用值。</p></div></div>
+<p>REPL 实测一张半径 8 六边形图（217 格）：移动力 2 的单位从原点出发，可达 19 格——起点 1 + 一环 6（各耗 1 点）+ 二环 12（平地各耗 2 点）；在 (0,1) 放一个丘陵特征后，(0,1) 本身仍可达（1+2=3 超了？不——⑨ 的钉价规则让它记 2.0 满价，仍出现在结果里），而穿过它去 (0,2) 就彻底没了：丘陵后面那格连记录都不该有……实测正是如此，(0,2) 不在表里，其余二环 11 格照常可达（共 18 格）。把移动力换成 1.5 再测：一环照常（各耗 1 点），丘陵格 (0,1) 记 1.5 满价，平地二环格照常 1.5 钉价可达——18 格。这两个数字建议你自己在纸上推一遍，是本课练习 A 的原型。</p>
+<p>这层还有一个关键区分，测试 <code>PathfindingTests</code> 用一整组参数化用例钉死了它：</p>
+<div class="paired"><div><pre><code><span class="comment">// PathfindingTests 的“能过/能停”用例组（节选自两条测试）。问：谁的格子能借道？</span>
+// military unit, 2 movement, 一条竖墙在 x==1：
+verticalWall(1, { testGame.addUnit("Worker", neutralCiv, it) })
+val paths = unit.movement.getMovementToTilesAtPosition(originTile.position, 2f)
+assertTrue("should move to neutral civilians",
+    paths.containsKey(testGame.tileMap[1,0]))          <span class="comment">// ① 中立平民：能到它那格</span>
+assertTrue("Classic passes through neutral civilians",
+    paths.containsKey(testGame.tileMap[2,0]))          <span class="comment">// ② 老实现：还能穿过去</span>
+
+verticalWall(1, { testGame.addUnit("Warrior", barbarianCiv, it) })
+val paths2 = unit.movement.getMovementToTilesAtPosition(originTile.position, 2f)
+assertTrue("should move to enemy military",
+    paths2.containsKey(testGame.tileMap[1,0]))         <span class="comment">// ③ 敌军：那格算可达</span>
+assertFalse("should not pass through enemy military",
+    paths2.containsKey(testGame.tileMap[2,0]))         <span class="comment">// ④ 但穿不过去</span></code></pre><p class="source"><a href="../../tests/src/com/unciv/logic/map/PathfindingTests.kt">本地 PathfindingTests.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/PathfindingTests.kt#L305">neutral military 用例 · L305</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/PathfindingTests.kt#L322">enemy military 用例 · L322</a></p></div><div><p>脑内模型是<strong>门口的六种邻居</strong>：友军、中立、敌人， civilian 与 military 两两组合，各自的“能到/能穿”完全由 <code>cannotPassThroughReason</code> 的分支决定——测试把这些组合全部枚举了一遍。</p><p>① 中立平民的格子能到（断言一），② 老实现还能穿过去（断言二）；③ 敌方军事单位的格子同样记为可达（好让攻击寻路能选中它），④ 但 <code>canPassThrough</code> 返回 false，后面那格不会有记录——这就是“能到它、不能穿过它”。</p><p>整组用例还覆盖：友军格（能穿能停）、中立城（能路过不能停）、敌城（能“到”=能攻）、中立军事（能到不能穿）。跑法：<code>:tests:test --tests "com.unciv.logic.map.PathfindingTests"</code>——本课核对 108 过 6 跳过 0 失败（跳过是 assumeTrue 按算法参数裁掉的分支）。</p></div></div>
+</section>
+
+<section id="path"><h2>3. 跨回合的最短路：路径</h2>
+<p>可达图回答“这回合”，路径回答“这局”：目标在 20 格外，单位要分好几个回合走完。<code>UnitMovement.getShortestPath</code> 的老实现是<strong>按回合长树</strong>：每一轮先算出本回合的可达图，从边缘挑出下一回合的出发点，直到够到目标：</p>
+<div class="paired"><div><pre><code><span class="comment">// UnitMovement.getShortestPath 的主循环（部分代码）。问：好几回合的路怎么长出来？</span>
+var tilesToCheck = listOf(currentTile)
+val movementTreeParents = HashMap&lt;Tile, Tile?&gt;()    <span class="comment">// ① 回合树：这格从哪格跳来的</span>
+movementTreeParents[currentTile] = null
+var distance = 1                                     <span class="comment">// ② 第几个回合</span>
+val visitedTilesBitset = BitSet(currentTile.tileMap.tileList.size)   <span class="comment">// ③ 老格子不再当出发点</span>
+visitedTilesBitset.set(currentTile.zeroBasedIndex)
+
+while (true) {
+    newTilesToCheck.clear()
+    val comparison: Comparator&lt;Tile&gt; = if (unit.type.isLandUnit())
+        compareBy({!it.isLand}, {it.aerialDistanceTo(destination)}, ::isUnfriendlyCityState)
+    else compareBy({it.aerialDistanceTo(destination)}, ::isUnfriendlyCityState)
+    val tilesByPreference = tilesToCheck.sortedWith(comparison)      <span class="comment">// ④ 先陆地、离目标近的先试</span>
+
+    for (tileToCheck in tilesByPreference) {
+        val distanceToTilesThisTurn = if (distance == 1)
+            getDistanceToTiles(true, passThroughCacheNew, movementCostCache)
+        else getMovementToTilesAtPosition(          <span class="comment">// ⑤ 每个出发点各算一次单回合可达</span>
+                tileToCheck.position, unitMaxMovement, false,
+                visitedTilesBitset, passThroughCacheNew, movementCostCache)
+
+        for (reachableTile in distanceToTilesThisTurn.keys) {
+            if (avoidDamagingTerrain &amp;&amp;
+                unit.getDamageFromTerrain(reachableTile) &gt; 0) continue   <span class="comment">// ⑥ 第一遍避开伤地</span>
+            if (reachableTile == destination) {
+                val path = mutableListOf(destination)     <span class="comment">// ⑦ 够到了：回溯成列表</span>
+                var intermediateTile = tileToCheck
+                while (intermediateTile != currentTile) {
+                    path.add(intermediateTile)
+                    intermediateTile = movementTreeParents[intermediateTile]!!
+                }
+                path.reverse()
+                return path
+            }
+            if (movementTreeParents.containsKey(reachableTile)) continue  <span class="comment">// ⑧ 先到先得</span>
+            if (!canMoveToCache.getOrPut(reachableTile) { canMoveTo(reachableTile) })
+                continue                                  <span class="comment">// ⑨ 不能停的格不当出发点</span>
+            movementTreeParents[reachableTile] = tileToCheck
+            newTilesToCheck.add(reachableTile)
+        }
+    }
+    if (newTilesToCheck.isEmpty()) return emptyList()     <span class="comment">// ⑩ 扩不出去：无路</span>
+    for (tile in newTilesToCheck) visitedTilesBitset.set(tile.zeroBasedIndex)
+    tilesToCheck = newTilesToCheck.filterNot { tile -&gt;
+        tile.neighbors.all { visitedTilesBitset.get(it.zeroBasedIndex) } }  <span class="comment">// ⑪ 只留边缘</span>
+    distance++
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt">本地 UnitMovement.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt#L156">getShortestPath · L156</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt#L488">moveToTile · L488</a></p></div><div><p>脑内模型是<strong>一圈圈扎营</strong>：每天（回合）从营地派出侦察兵画当天的可达图，天黑前在图边缘选下一批营地，营地的营地连成树；哪天摸到目标，就沿着树走回去。</p><p>① <code>movementTreeParents</code> 是跨回合的骨架：每个“被选为出发点”的格子指向它上一回合的出发点。注意与单回合可达图里的 parent（那格的<strong>上一步</strong>）是两个层面。</p><p>② distance 是回合数：第 1 轮用单位当前剩的移动力，之后每轮用满移动力（unitMaxMovement）——所以第一天的行程往往比后面几天短。</p><p>③ visitedTilesBitset 让老格子不再作为出发点：第 1 天能到的格子，不需要第 3 天再从它出发一次。BitSet 按 zeroBasedIndex 索引——这就是第五课“寻路位图索引用”的落点。</p><p>④ 同一批出发点有优先级：先陆地（海军反之）、按 <code>aerialDistanceTo</code>（几何距离，第五课）离目标近的先试、非不友好城邦优先。这只影响找到的路径的“品味”，不影响能否找到。</p><p>⑤ 每个出发点各算一次单回合可达图，参数里带上 visitedTilesBitset——已访问的格子在可达图里直接跳过（第 2 节的 tilesToIgnoreBitset）。</p><p>⑥ 可通行但会掉血的地（迦太基过山那种），第一遍先绕开；绕不过再带着 damageFreePath == false 重来。A* 新实现把这套逻辑内化成了 damagingTiles 优先级（第 4 节）。</p><p>⑦ 摸到目标就回溯：destination ← 本回合出发点 ← 上回合出发点 ← … ← 起点反转。中间步由每回合落点对应的单回合可达图补全，<strong>返回的列表只含每回合的落点</strong>——测试 <code>getShortestPathReturnsOnlyEndOfTurns</code> 钉的就是这个：移动力 3、两格丘陵拦路去 (0,3)，返回 [(0,2), (0,3)] 两个元素，(0,1) 是第一天经过的中间步，不在落点列表里。REPL 实测一致。</p><p>⑧ 同一格先被哪个出发点够到就归谁——先到先得。这就是类注释里“不保证最优，但相当好”的来源：它优化的是<strong>回合数</strong>（每轮所有可达边缘同时展开），不是移动点总和。</p><p>⑨ canMoveTo 为假的格子（友军占着、敌城）可以出现在可达图里，但不进下一轮出发点——你不能把家安在别人床上。</p><p>⑩ 一轮下来一个新格子都没解锁，说明整片可达域都被封锁（山围死、敌军堵路），返回空表。测试 <code>whenThereIsNoRouteThenReturnNull</code> 用一圈山围死 (2,0) 验证：REPL 实测返回 size 0。</p><p>⑪ 只留“边缘”格子当下一轮出发点：四周全是老格子的出发点不可能再解锁新格子，剪掉省一轮可达图。真正执行移动的是 <code>moveToTile</code>：拿单回合可达图、沿路径逐格扣移动力、遇阻（迷雾里冒出障碍）中断重算——第 20 课细讲。</p></div></div>
+<p>“优化回合数还是优化移动点总和”不是学术问题，两条测试把它钉成了行为规格：</p>
+<div class="paired"><div><pre><code><span class="comment">// PathfindingTests.shortestPathByTurnsNotSumOfMovements（完整思路）。问：绕路 4 点 vs 穿山 5 点，选谁？</span>
+testGame.setTileTerrain(HexCoord(0,1), "Hill")
+testGame.setTileTerrain(HexCoord(0,2), "Hill")
+val baseUnit = testGame.createBaseUnit()
+baseUnit.movement = 1
+val unit = testGame.addUnit(baseUnit.name, civInfo, originTile)
+// 直线：(0,1)(0,2) 两格丘陵 + 一格平地 = 2+2+1 = 5 移动点，3 个回合
+// 绕行：4 格平地 = 4 移动点，但 4 个回合
+assertEquals(3, unit.movement.getShortestPath(testGame.getTile(0,3)).size)   <span class="comment">// ① 选 3 落点的直线路</span></code></pre><p class="source"><a href="../../tests/src/com/unciv/logic/map/PathfindingTests.kt">本地 PathfindingTests.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/PathfindingTests.kt#L74">shortestPathByTurnsNotSumOfMovements · L74</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/tests/src/com/unciv/logic/map/PathfindingTests.kt#L121">shortestPathEvenWhenItsWayMoreTiles · L121</a></p></div><div><p>这里的取舍像<strong>出差选路线</strong>：一天能到的班机 vs 转三趟但总价便宜的火车——单位按“天数”（回合数）选，不按“票价”（移动点总和）选。</p><p>① 移动力 1 的单位直穿丘陵：每天最多挪一格，3 天到；绕平地要 4 天。尽管直线的移动点总和（5）比绕行（4）贵，路径仍选直线——因为玩家体感的是“几回合到”，不是“花了几个移动点”。反过来的测试 <code>shortestPathEvenWhenItsWayMoreTiles</code>（仅 A* 通过）：一条 14 格的铁路环线 vs 3 格直路，移动力 1 的单位选铁路——13 格只花 1.3 移动点、2 个回合内走完，3 格直路要 3 个回合。REPL 实测返回 [(3,4), (0,4)]：第 1 天沿铁路狂奔到 (3,4)，第 2 天到 (0,4)。</p><p>另一个对照是 <code>maximizeRemainingMovementWhenReachingDestination</code>：移动力 5 的单位走同一条 3+2 丘陵路，到达后剩 1 点——因为 moveToTile 途中每一步都按真实代价扣（5−2−2−1），它选的是“能在本回合走完的路”。REPL 实测 currentMovement = 1.0。</p></div></div>
+</section>
+
+<section id="engine"><h2>4. 引擎：A* 与两代实现</h2>
+<p>前面两节讲的是“语义”，这一节讲“引擎”。Unciv 同时维护两套寻路：<strong>老实现</strong>（上一节的按层松弛/长树，设置项 <code>useAStarPathfinding = false</code>，当前默认）与 <strong>A* 新实现</strong>（<code>PathingMap</code> 一族，设置里勾选 Pathfinding algorithm 切换，注释声明它最终要完全替代老实现）。入口在 <code>UnitMovement</code> 里按设置分流：</p>
+<div class="paired"><div><pre><code><span class="comment">// UnitMovement 的两套缓存（部分代码）。问：两代引擎怎么共存？</span>
+@Cache private val pathfindingCache = PathfindingCache(unit)               <span class="comment">// ① 老实现的结果缓存</span>
+@Cache private val aStarPathing by lazy {
+    PathingMap.createUnitPathingMap(unit) }                                <span class="comment">// ② A* 的图级缓存</span>
+@Cache private val roadPathing by lazy {
+    PathingMap.createRoadPathingMap(unit.civ, unit.currentTile) }          <span class="comment">// ③ 修路的专用图</span>
+
+fun getDistanceToTiles(...): PathsToTilesWithinTurn {
+    if (UncivGame.Current.settings.useAStarPathfinding) {
+        val pathingMap = ... aStarPathing ...
+        return pathingMap.getMovementToTilesAtPosition()                   <span class="comment">// ④ A* 版可达图</span>
+    }
+    val distanceToTiles = getMovementToTilesAtPosition(...)                <span class="comment">// ⑤ 老实现可达图</span>
+    return distanceToTiles
+}
+
+fun getShortestPath(destination: Tile, ...): List&lt;Tile&gt; {
+    if (unit.cache.cannotMove) return listOf()
+    if (UncivGame.Current.settings.useAStarPathfinding)
+        return aStarPathing.getShortestPath(destination) ?: listOf()      <span class="comment">// ⑥ A* 版最短路</span>
+    ...老实现...                                                           <span class="comment">// 老实现最短路，分流见上一条</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt">本地 UnitMovement.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt#L51">缓存字段 · L51</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/models/metadata/GameSettings.kt#L163">useAStarPathfinding · GameSettings L163</a></p></div><div><p>脑内模型是<strong>同一栋楼的两套电梯</strong>：楼层（语义：可达图、最短路）不变，牵引方式（引擎）新旧并行，门口一个开关决定坐哪部。</p><p>① 老实现只有结果级缓存：PathfindingCache 记“上次问的 destination 和路径”，单位没动没花力才命中。</p><p>② A* 单位图的图级缓存：PathingMap 一旦算过，每个格子的 RouteNode（到它几回合、花多少、从哪来）都留着，下次问别的目标直接复用。</p><p>③ 修路有单独的图（第 1 节的 roadPreferredMovementCost：已有路的格 0.5、可修路的格 1——反正修了路原代价就无所谓了）。</p><p>④⑤ 可达图入口按设置分流，两个版本同名同返回类型；⑥ 最短路入口同样分流。调用方无感。测试类用 @Parameters 把两套算法各跑一遍（companion 的 TestRunnerFactory.Parameters.pathfinding），所以测试数是双份的。</p></div></div>
+<p>A* 这一侧的类分工：<code>PathingMap</code> 管缓存生命周期，<code>PathingMapCache</code> 存数据，<code>AStarPathfinder</code> 做搜索，<code>RouteNode</code>/<code>PrioritizedNode</code> 是塞进 Long 的节点。先看缓存与节点：</p>
+<div class="paired"><div><pre><code><span class="comment">// PathingMapCacheKey 与 RouteNode 的位域（节选）。问：一个节点怎么塞进 64 位？</span>
+data class PathingMapCacheKey(
+    val startingPoint: HexCoord,
+    val moveRemaining: FixedPointMovement,
+    val fullMove: FixedPointMovement,
+)                                                              <span class="comment">// ① 缓存键：位置+余力+满力</span>
+
+// RouteNode 的字段（按位从低到高，源码注释摘录）：
+// tileIdx        20 位  zeroBasedIndex（最大半径 500 的图）              <span class="comment">// ② 格子编号</span>
+// relationship    3 位  与格主的邦交（盟友最优）                          <span class="comment">// ③ 平局裁决</span>
+// pbmMoveThisTurn 9 位  “进山前暂停”假想的已用移动力（base-30 定点）      <span class="comment">// ④ 追补暂停</span>
+// moveUsedThisTurn 9 位  本回合已用移动力（base-30 定点）                 <span class="comment">// ⑤ 当前状态</span>
+// turns           6 位  到这格用了几个回合                                <span class="comment">// ⑥ 回合数</span>
+// parentClockDir  3 位  父格在几点钟方向（/2 存储，14=无父）              <span class="comment">// ⑦ 回溯指针</span>
+// canMoveTo       1 位  能否停在这格                                     <span class="comment">// ⑧ 停留标记</span>
+// damagingTiles   2 位  一路穿了几格伤血地（最高优先级字段）              <span class="comment">// ⑨ 伤血计数</span>
+
+@JvmInline
+value class FixedPointMovement private constructor(val bits: Int) {  <span class="comment">// ⑩ 定点数：1.0=30</span>
+    ...
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/PathingMapCache.kt">本地 PathingMapCache.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/PathingMapCache.kt#L18">RouteNode 类注释 · L18</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/PathingMapCache.kt#L294">FixedPointMovement · L294</a></p></div><div><p>脑内模型是<strong>把一张登记卡压进一个长整数的行李箱</strong>：每样信息占固定的几个比特，按“越靠左越优先”排座次，比较优先级时直接比较整个 Long——不用拆箱、不用分配对象。</p><p>① 缓存键三元组：单位<strong>在哪</strong>、还剩多少力、满力多少。任何一项变了（走了、动了），整张缓存作废重来。所以 A* 缓存只在“单位不动连续询问”时命中。</p><p>② 20 位下标正好覆盖第五课的 zeroBasedIndex（最大图 748501 格 &lt; 2^20）。缓存本体是 LongArray(tileList.size)，按 zeroBasedIndex 直接寻址——第六课的 tileList 顺序在这里变成了数组布局。</p><p>③ 邦交分 8 档存在 3 位里，存的是 (7−ordinal)，盟友=0 最优——平局时优先走朋友的地。</p><p>④⑤⑥ 移动力用 <strong>base-30 定点数</strong>存：1.0 = 30。为什么是 30？铁路 0.1 = 3/30、道路 1/3 = 10/30——这两个分数在 base-30 下都是<strong>精确</strong>整数，浮点数 0.1+0.2≠0.3 的经典麻烦被彻底绕开。REPL 实测：fpmFromMovement(3.666f).bits = 110（= 3×30+20），读回 3.6666667；FPM_ONE.bits=30、FPM_POINT_FIVE.bits=15。9 位最多存 511/30≈17.0 移动力，正好覆盖原版最快的单位加双倍移动。</p><p>⑦ 父格不存坐标存<strong>钟点方向</strong>（第五课的 6 个邻居方向，偶数所以 /2 存 3 位）——回溯时从当前格按钟点取邻居即得父格，20 位坐标省成了 3 位。</p><p>⑧ canMoveTo 一位：这格是“能路过”还是“能安家”。</p><p>⑨ damagingTiles 是<strong>全字段最高位</strong>：宁可绕远也不掉血的路线永远优先，只有实在绕不开才允许“带伤路线”赢——这正是老实现要跑两遍（先避损后放行）的逻辑，A* 把它变成了优先级的一部分。只记 0～3，2 位封顶。</p><p>⑩ FixedPointMovement 是全套算术的定点包装：加减乘除、coerce 都按 bits 做整数运算，浮点只在入口（fpmFromMovement，HALF_UP 舍入）和出口（toFloat）出现。</p></div></div>
+<p>搜索本身在 <code>AStarPathfinder</code>。A* 的骨架是“已花 + 预估 = 优先级，优先级最小的先展开”，Unciv 的预估函数（启发式）值得一提：</p>
+<div class="paired"><div><pre><code><span class="comment">// AStarPathfinder.calculateUnderestimatedMovement 与主循环骨架（部分代码）。问：先展开谁？</span>
+private fun calculateUnderestimatedMovement(node: RouteNode): FixedPointMovement {
+    val tile = node.tile(tileMap)
+    val movementSoFar = fpmFullMovement * node.turns
+        + node.moveUsedThisTurn.coerceAtMost(fpmFullMovement)      <span class="comment">// ① 已花：回合×满力+本回合已用</span>
+    val minRemainingTiles = destination?.let { tile.aerialDistanceTo(it) } ?: 1
+    val minRemainingCost = tileRoadCost(tile) + (minRemainingTiles - 1) * (FASTEST_ROAD_COST)
+                                                                    <span class="comment">// ② 预估：几何距离×最快路价 0.1</span>
+    return movementSoFar + minRemainingCost
+}
+
+internal fun stepUntilDestination(): Tile? {
+    val startTile = tileMap[cache.key.startingPoint]
+    if (endSearchPredicate(startTile, ...)) return startTile
+    while (todo.isNotEmpty()) {
+        val currentPrioritizedNode = PrioritizedNode(todo.poll())  <span class="comment">// ③ 取优先级最高（Long 最小）</span>
+        val currentNode = RouteNode(routeNodes[currentPrioritizedNode.tileIdx])
+        val currentTile = currentNode.tile(tileMap)
+        for (neighborTile in currentTile.neighbors) {              <span class="comment">// ④ 算六邻居</span>
+            val foundTargetTile = considerNeighbor(currentNode, neighborTile)
+            if (foundTargetTile != null) return foundTargetTile
+        }
+        ...
+        if (destination != null &amp;&amp; RouteNode(routeNodes[destination.zeroBasedIndex]).initialized)
+            return destination                                     <span class="comment">// ⑤ 目标初始化过即停</span>
+    }
+    return null
+}
+
+// companion: FASTEST_ROAD_COST = 0.1f                            <span class="comment">// ⑥ 与铁路同速的预估下限</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/PathingMapAStarPathfinder.kt">本地 PathingMapAStarPathfinder.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/PathingMapAStarPathfinder.kt#L113">calculateUnderestimatedMovement · L113</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/PathingMapAStarPathfinder.kt#L255">stepUntilDestination · L255</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/PathingMapAStarPathfinder.kt#L287">FASTEST_ROAD_COST · L287</a></p></div><div><p>脑内模型是<strong>导游估时</strong>：每个格子排队时带着“已花时间 + 到终点最快也要多久”的估计，总估计最短的先被展开；估计永远不夸大（可采纳启发式），所以先展开到的路线一定是真最短。</p><p>① 已花 = 回合数 × 满力 + 本回合已用。用“满力”折算回合数是关键：一个回合不管走没走满都算一整个回合的预算，这与“优化回合数”的目标一致。</p><p>② 预估 = 几何距离（第五课的 aerialDistanceTo）× <strong>0.1</strong>——假设剩余每一格都是铁路。这是<strong>物理下限</strong>：任何路的单格代价都不可能低于铁路，所以这个预估永远不会高估，A* 的正确性由此保证。源码注释还解释了为什么不取 0（纯 Dijkstra）：取 0 也能对但慢得多；也不能高于 0.1，否则会错过“绕远坐铁路”的最优解——第 3 节那条 14 格铁路环线正是靠 0.1 的预估才赢过 3 格直路的。</p><p>③ todo 是 LongPriorityQueue：PrioritizedNode 把预估总代价塞进 RouteNode 的高位，比较时整个 Long 直接比——damagingTiles 在最高位，所以“不掉血”永远压过“便宜”；同为不掉血时比预估，再比邦交、比回合。一次堆操作零对象分配。</p><p>④ considerNeighbor 对每个邻居做三件事：要不要排队（neighborNeedsQueueing）、要不要算（neighborNeedsCalcuating）、算成什么（calculateNeighborNode——同回合推进、跨回合推进、占位 stub、追补暂停、带伤排队五个分支）。不可通行的邻居写一个 noPathingNode（全字段最大值）永久标记。</p><p>⑤ 目标格的 RouteNode 一旦被初始化就停——不必把整张图算完，这正是 A* 相对老实现“全图长树”的效率来源。而算过的部分全部留在缓存里，下次问图上任何其他格子都直接可用。</p><p>⑥ FASTEST_ROAD_COST 与 RoadStatus.Railroad.movementImproved 用 init 块断言相等：铁路一旦改价，预估下限必须同步改，否则正确性前提被破坏。这种“常量间的一致性用断言钉住”的做法值得抄。</p></div></div>
+<p>最后收拢两代实现的语义差异——同一条测试在两套算法下断言不同的地方（源码里 assumeThat/assumeTrue 标注的那些）：</p>
+<table><thead><tr><th scope="col">行为</th><th scope="col">老实现（默认）</th><th scope="col">A* 新实现</th></tr></thead><tbody>
+<tr><td>中立/敌方平民格能否穿行</td><td>能穿（canPassThrough 放行）</td><td>不穿，只标记可到</td></tr>
+<tr><td>移动力近 0 时相邻格是否可达</td><td>全部 6 邻居记满价可达</td><td>只返回起点（moveRemaining ≤ 0 直接空）</td></tr>
+<tr><td>“绕远坐铁路赢过直路”</td><td>算不出（无此语义）</td><td>能算（预估下限 0.1 保证）</td></tr>
+<tr><td>“进山前暂停补移动力”</td><td>两遍搜索模拟</td><td>pbmMoveThisTurn 追补，一遍完成</td></tr>
+<tr><td>结果缓存</td><td>结果级（同目标才命中）</td><td>图级（算过的格子全部复用）</td></tr>
+<tr><td>数值表示</td><td>Float + 容差 epsilon</td><td>base-30 定点数，无舍入误差</td></tr>
+</tbody></table>
+<p>地图生成专题的地图到这里第一次被“消费”：代价函数读地形分层与河流边（第 06、09 课），可达图读控制区与迷雾，路径把几何距离（第 05 课）当预估下限。下一课的视野系统会继续沿这条“地图被使用”的主线走。</p>
+<aside class="callout"><strong>Godot 对照：缓存键与失效比缓存本身更重要</strong><p>A* 这一侧最值得带走的设计不是 A* 本身（Godot 有现成的 AStar2D），而是三件事：①<strong>缓存键</strong> PathingMapCacheKey 把“单位位置、剩余移动力、满移动力”压成可比较的值，键一变缓存全弃——比“到处打脏标记”可靠得多；②<strong>定点数</strong>：Godot 的 float 与 Kotlin 一样有 0.1 累加误差，回合制游戏的结算链一长就会出“差 0.01 打不动”的 bug，把价格换算成 int（乘 30 或 100）在进出口转换是标准解法；③<strong>用断言钉住常量间的一致性</strong>（FASTEST_ROAD_COST == 铁路速度）：引擎自带的 AStar 改不了启发式，但你的规则数据间同样存在“改了 A 必须同步 B”的约束，init/assert 或单元测试都行。Godot 4.x 均适用。</p></aside>
+</section>
+
+<section id="tradeoffs"><h2>5. 约束与取舍</h2>
+<p>把这一课散见的“为什么这样设计”收拢成一张表。读法：<strong>第一列</strong>是设计决定；<strong>第二列</strong>解决什么；<strong>第三列</strong>付出的代价或边界；<strong>第四列</strong>是源码位置。按“正确性”和“性能”分两组。</p>
+<table><thead><tr><th scope="col">决定</th><th scope="col">保证什么</th><th scope="col">代价与边界</th><th scope="col">源码位置</th></tr></thead><tbody>
+<tr><td colspan="4"><strong>正确性</strong>——路径要对、要符合玩家直觉</td></tr>
+<tr><td>按回合数而非移动点总和优化</td><td>玩家体感的“几回合到”</td><td>移动点总和可能不是最小（丘陵直穿 5 点 &gt; 绕行 4 点仍选直穿）</td><td>getShortestPath L156、测试 L74</td></tr>
+<tr><td>预估 = 几何距离 × 0.1</td><td>永不高估，A* 结果正确</td><td>不能调高换速度：会错过远路铁路</td><td>calculateUnderestimatedMovement L113</td></tr>
+<tr><td>伤血地记 damagingTiles 且放最高位</td><td>宁绕远不掉血</td><td>只记 0～3 格，更长的带伤路线无法细分</td><td>RouteNode L78、L218</td></tr>
+<tr><td>可达≠可停（canPassThrough / canMoveTo 分开）</td><td>能借道友军、能选中攻击目标</td><td>每个消费方都得自己再查一次 canMoveTo</td><td>cannotPassThroughReason L799</td></tr>
+<tr><td>迷雾格猜作代价 1</td><td>未知地形不卡死操作</td><td>半路撞上山要中断重算（moveToTile 的 needToFindNewRoute）</td><td>getMovementToTilesAtPosition L113</td></tr>
+<tr><td colspan="4"><strong>性能</strong>——寻路是每帧都可能跑的热路径</td></tr>
+<tr><td>代价链“先命中先返回”</td><td>最常见的平地代价 1 最快走到兜底</td><td>顺序即语义：新增规则必须找对插队位置</td><td>MovementCost L40</td></tr>
+<tr><td>节点压进 Long、堆比较裸 Long</td><td>零对象分配的 A* 主循环</td><td>字段位宽写死（20 位格号上限、9 位移动力上限 17）</td><td>RouteNode L18、PrioritizedNode L35</td></tr>
+<tr><td>base-30 定点数</td><td>0.1 与 1/3 都精确，无浮点容差</td><td>所有运算要走 FPM 包装，不能随手写 Float</td><td>FixedPointMovement L294</td></tr>
+<tr><td>图级缓存 + 键失效</td><td>一次搜索服务后续所有询问</td><td>单位一动全弃；有“早先路径轻微偏好”的偏差（类注释自述）</td><td>PathingMapCacheKey L339、fetchCache L99</td></tr>
+<tr><td>两套引擎并行、测试双跑</td><td>新实现可灰度切换、逐步替换</td><td>同一行为要在两处同步维护，测试数翻倍</td><td>PathfindingTests @Parameters L37</td></tr>
+</tbody></table>
+<aside class="callout tradeoff"><strong>取舍：先语义后引擎</strong><p>这一课的阅读顺序本身就是 Unciv 的开发顺序：先把“一步多少钱、能到哪、几回合到”的语义用最直白的代码写对（老实现几乎就是伪代码），再为性能重写引擎（A* + 位域 + 定点数），全程用同一组测试钉住语义。反过来先写引擎再补语义，通常得到一个“快但没人说得清它算的是什么”的寻路器。做自己的游戏时同样建议先写朴素 BFS 版本验证规则手感（代价表调起来才知道好不好玩），引擎优化放在数值稳定之后。两套并行的灰度切换在单机游戏里显得隆重，但“测试按算法参数化双跑”这个习惯在任何项目里都划算。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>一步的价钱按固定顺序判定：不能动/上下船/ZoC 的 100f 哨兵 → 铁路 0.1 → 道路 0.5 或 1/3 → 双倍移动减半 → 地形原价；lastTerrain 决定地形价（Hill/Forest 2、Marsh 3、平地 1）。</strong></li><li><strong>可达图是水波扩散：每格记最便宜累计价与来向；过不去的格记满价（攻击寻路要用），超预算的格钉满价仍可达（相邻格总能挤过去）。</strong></li><li><strong>“能过”与“能停”是两个问题：canPassThrough 管借道，canMoveTo 管安家；友军格能停、中立平民老实现能穿、敌军敌城只能“到”。</strong></li><li><strong>跨回合路径按回合数优化：每轮从可达边缘长一截树，返回值只含每回合落点；绕远铁路能赢过直路（A*），丘陵直穿能赢过平地绕行（按天数）。</strong></li><li><strong>A* 引擎三件套：缓存键（位置+余力+满力）管失效、RouteNode 塞进一个 Long（伤血最高位、邦交当平局裁决、父格存钟点）、base-30 定点数让 0.1 和 1/3 都精确。</strong></li><li><strong>预估 = 几何距离 × 铁路价 0.1 是物理下限，保证 A* 正确还不慢；两代实现同名入口、测试双跑，语义被测试钉死而不是被注释描述。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；不看正文讲清“一步怎么计价、一回合能到哪、跨回合怎么选路”，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="c"><fieldset><legend>1. 移动力 2 的单位走进丘陵格（无道路涉河），这一步扣几点？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="几何距离只用于寻路预估（aerialDistanceTo × 0.1），真实扣减走的是代价函数，与格数无关。"><span>按格子数算一格</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="100f 只给特殊状态：不能动、上下船、控制区、渡河。普通丘陵不在其列，按地形价收 2。"><span>按哨兵值扣整回</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="lastTerrain 取最顶层：Hill 特征的 movementCost = 2，代价链一路走到地形价那层返回 2f。"><span>按地形价扣两点</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="减半属于 Double movement 类 unique（如森林弓手），普通单位不享受；丘陵原价 2 全额收。"><span>按双倍移动扣半</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="b"><fieldset><legend>2. 一格被友方军事单位占着，我的军事单位对它的判定是？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="说反了：canPassThrough 对友军放行（能借道），canMoveTo 因 TileIsNotEmpty 拒绝（除非换位）——是能过不能停。"><span>能停但不能通过</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="canPassThrough 放行所以能借道；canMoveTo 查到格子非空返回 TileIsNotEmpty，所以停不下（换位另说）。"><span>能路过不能停下</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="两个都不行的是敌军格：canPassThrough 拒绝（穿不过），但那格仍标可达以供攻击寻路选中。"><span>停和过都不允许</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="能停能过的是空格（或自己文明的换位场景）；友军占格时 canMoveTo 会因格子非空拒绝。"><span>既能停也能通过</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>3. 移动力 1 的单位，直穿两格丘陵 3 回合、绕平地 4 回合，路径选谁？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="绕行 4 点移动点确实更省（4 &lt; 5），但路径优化的不是移动点总和，而是回合数。"><span>绕行更省移动点</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="平地一步代价 1 没错，但每回合只能走一步，绕 4 格就是 4 个回合，比直穿多一天。"><span>平地一天走多格</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="测试 shortestPathByTurnsNotSumOfMovements 钉死了相反行为：断言路径长度为 3，即选直穿。"><span>两条路随机挑一</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="getShortestPath 按回合数展开：直穿 3 天 &lt; 绕行 4 天，选直穿，哪怕移动点总和 5 &gt; 4。测试 L74 断言 size == 3。"><span>直穿只要三回合</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. A* 寻路的预估函数为什么用“几何距离 × 0.1”？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="0.1 是全游戏单格最低价（铁路）：假设剩余每格都是铁路得到的估计永不高于真实，A* 正确性由此保证；且比取 0 的 Dijkstra 快。"><span>铁路价当格下限</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="预估若会高估，A* 可能先展开一条次优路线而错过真正的最短路——高估破坏的是正确性，不只是速度。"><span>取大点搜索会快</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="0.5 是无机器科技时的道路价，比铁路 0.1 贵；用它当“下限”会高估走铁路的真实代价，错过远路铁路最优解。"><span>道路价就是下限</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="平地价 1 当下限等于宣称“没有比平地更快的方式”，铁路 0.1 的存在直接证伪；预估会系统性高估，正确性没了。"><span>平地价兜底最稳</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：按地形价扣两点；2：能路过不能停；3：直穿只要三回合；4：铁路价当每格下限。分别对应 <a href="#cost">代价判定链</a>、<a href="#reach">可达图的能过能停</a>、<a href="#path">回合数优先</a>、<a href="#engine">A* 启发式</a>。</p></details>
+<h3>练习 A · 手推一张可达图（10 分钟）</h3><p>一张无限平地图，单位站在 O，移动力 2，东边相邻格 H 是丘陵，H 的东边相邻格 F 是平地（其余方向全是平地）。① 列出本回合可达的所有格子（以“相对 O 的方位 + 环数”描述）与各自的 totalMovement。② H 格的 totalMovement 是多少？它为什么出现在结果里？③ F 格（H 后面那格）在不在结果里，为什么？④ 若单位移动力是 1.5，H 与 F 的结论变不变？</p><details class="rubric"><summary>展开核对要点</summary><p>① 一环 6 格各耗 1 点；二环平地 11 格（除 H 东边的 F 外共 11 格：H 方向只有 F 一格被挡）各耗 2 点。合计 O + 6 + 11 = 18 格——与 REPL 实测的丘陵场景完全一致（217 格图 18 格）。② H 的真实累计 1+2=3 超了 2，按钉价规则记 usableMovement=2.0 仍入表——这就是“ Civ V 相邻格总能挤过去”的实现。③ F 不在：到 F 必须经过 H，而 H 已记满价、不再作为扩散源（updatedTiles 不含 H）。④ 1.5 时：一环照常各耗 1 点；H 钉 1.5 仍可达；F 仍不可达（H 不扩散）。REPL 实测两场景均为 18 格，H 记满价、F 无记录。</p></details>
+<h3>练习 B · 算一条跨回合路径（8 分钟）</h3><p>单位移动力 3，站在 (0,0)，目标 (0,4)。(0,1)、(0,2) 是丘陵，其余全平地，无道路。① 直穿路线每回合怎么走、几天到？绕行路线（避开两格丘陵）几天到？② getShortestPath 返回的列表里有哪几个坐标？为什么不是每一步都在里面？③ 若把移动力改成 5，到达后剩几点力？</p><details class="rubric"><summary>展开核对要点</summary><p>① 直穿：第 1 天 3 点走 (0,1)H 2 + (0,2)H 2 超了？——3 点走一格丘陵 2 剩 1，第二格丘陵 2 挤过去力尽停 (0,2)；第 2 天 3 点走 (0,3)1 + (0,4)1 到达，共 2 天。绕行：每格代价 1，从 (1,1) 方向绕约 6 格，也是 2 天。直穿不劣。② REPL 实测返回 [(0,2), (0,4)]：列表只含每回合落点（(0,2) 是第一天过夜处），中间步 (0,1)、(0,3) 由 moveToTile 按单回合可达图补全——getShortestPathReturnsOnlyEndOfTurns 测试钉的就是这个语义（同场景返回 2 元素）。③ 移动力 5：5−2−2=1 剩 1 点正好走 (0,3)，第 2 天 5−1=4 点余裕到达。REPL 实测（maximizeRemainingMovementWhenReachingDestination 场景，目标 (0,3)）currentMovement = 1.0。</p></details>
+<h3>练习 C · 判定链插队（5 分钟）</h3><p>把下面四个情形按代价函数的判定顺序排出来，并说出各自命中的层与价格：A 两端铁路格；B 有道路连接但隔河（未研究跨河科技）；C 带无视地形的侦察兵走进丛林；D 移动力 0 的单位尝试移动。</p><details class="rubric"><summary>展开核对要点</summary><p>顺序 D → B → A → C（按命中先后）：D 最先被 cannotMove 拦住，100f；B 在道路判定处被 areConnectedByRiver 拦下（道路层要求 !areConnectedByRiver || roadsConnectAcrossRivers），落到渡河层 100f；A 在铁路层命中 0.1（注意铁路判定在道路之前）；C 的 ignoresTerrainCost 在道路之后、渡河之后，1f。这道题的重点是“顺序即语义”：C 如果有铁路可坐仍按铁路走（无视地形不吃铁路），D 无论地图怎样都动不了。</p></details>
+<h3>练习 D · 本地核验（可选，10 分钟）</h3><p>在 Kotlin REPL 或测试里复现本课的三个数字：① 移动力 2、一格丘陵挡路，getMovementToTilesAtPosition 返回多少格、丘陵格记多少代价？② 移动力 1、两格丘陵直穿，getShortestPath 去掉起点后长度是多少？③ 对同一条路先后查 getMovementCostBetweenAdjacentTiles：无科技、研究 Machinery 后各是多少？</p><details class="rubric"><summary>展开核对要点</summary><p>本课程核对（Kotlin REPL，TestGame + makeHexagonalMap(8)，G&K 规则集手动载入）：① 18 格，丘陵格 totalMovement=2.0（钉价）；② 3（返回 [(0,1),(0,2),(0,3)]，测试断言 size==3）；③ 0.5 → 1/3（RoadMovementSpeed unique 在 addTechnology("Machinery") 后改写 civ.tech.movementSpeedOnRoads）。环境要点：TestGame 前需手动 Ruleset().load(FileHandle(绝对路径)) 并放入 RulesetCache；丘陵用 setTileTerrain(pos, "Hill") 测试即有效（TestGame 的实现按特征处理），但读 lastTerrain.movementCost 前记得让 setTransients 生效；REPL 中 import 语句要单独一次 run。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/mapunit/movement/MovementCost.kt">MovementCost.kt</a> 全文（代价链的每一层与注释里的 #4232、#4085 讨论链接）；再读 <a href="../../core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt">UnitMovement.kt</a> 的类注释与 getShortestPath（两代实现的分工自述）；然后是 <a href="../../core/src/com/unciv/logic/map/PathingMap.kt">PathingMap.kt</a> 的类注释（未来计划清单本身就是一份设计文档）与 <a href="../../core/src/com/unciv/logic/map/PathingMapCache.kt">PathingMapCache.kt</a> 里 RouteNode 的位域注释；最后对照 <a href="../../tests/src/com/unciv/logic/map/PathfindingTests.kt">PathfindingTests.kt</a> 把 assumeThat 标注的行为差异走一遍。速查见 <a href="reference/hexmath.html#pathing">地图速查 · 移动与寻路</a>。</p><p>下次学习前，用两分钟默写：代价判定链的顺序（100f 的四种来源、铁路 0.1、道路 0.5/1/3、地形表）、能过与能停的三种邻居格、按回合数优化的那个测试场景、预估 0.1 的道理。约一周后重做练习 A 和 B。如果记不清“为什么可达图里敌军那格要记满价”，回第 2 节看源码注释的那段“否则攻击寻路全失灵”。</p><p>有不清楚的分支，可以直接问教学助手。把你手推的可达图或路径一起发来，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0010-starts-resources.html">上一课：可玩的出生地与资源</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="0012-sight-fog.html">下一课：地图怎样被看见</a></div></section>
+<footer>资料核对：2026-09-17。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。REPL 实测（TestGame 六边形图 + G&K 规则集）：平地代价 1/丘陵 2/沼泽 3；道路 0.5→机器后 1/3；铁路 0.1；FPM_ONE=30、3.666→bits 110；移动力 2 平地图 19 格可达、一格丘陵 18 格（钉价 2.0）；两丘直穿 3 落点、移动力 5 到达剩 1.0；14 格铁路环线胜过 3 格直路（A*）；山围死返回空。PathfindingTests 重跑 108 过 6 跳过 0 失败。</footer>
+</main></div>
+</body>
+</html>

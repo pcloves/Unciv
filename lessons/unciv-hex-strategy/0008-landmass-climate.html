@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>08 · 陆海与气候分布 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>08 / 陆海与气候分布</strong><a href="#goal">目标、回顾与场景</a><a href="#elevation">1. 陆海分布：一块噪声切一刀</a><a href="#noise">2. 柏林噪声：为什么连续</a><a href="#octaves">3. 倍频叠加与参数</a><a href="#types">4. 十三种地图类型的骨架</a><a href="#climate">5. 温度与湿度怎样定地形</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第七课<br>含源码走读与推演练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第二阶段 / 地图专题 · 生成专题第二课</div>
+<h1>陆海与气候分布</h1>
+<p class="lead">第七课看到了地图生成的整条流水线，这一课钻进前两道工序：MapLandmassGenerator 怎样用一块柏林噪声决定哪格是海，applyHumidityAndTemperature 又怎样用纬度加噪声算出每格的温度湿度，再交给规则集里的“温度湿度区间表”定下草原、荒漠还是冻土。读完你应当能从参数和中间结果解释连续分布为什么形成地形，并预测调整参数的影响。</p>
+<p class="meta">需要的基础：第七课的阶段链、随机源归属与环绕噪声入口。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>先给三个场景，三个都是新游戏界面上真实存在的选项。场景一：把“地图类型”下拉框换成 Archipelago（群岛），生成出来的图碎成一片小岛——每种类型背后是一个 createXxx 函数（第 4 节的表全部列出）。场景二：高级设置里把 Water level 滑块拉高，同一颗种子的大陆明显缩小。场景三：把 Temperature shift 拉到正数，冻土和雪原退到地图边缘，荒漠挤到中间。这三个旋钮背后是同一套机制：一块连续的噪声场加上一个阈值，再叠一层纬度决定的温度。</p>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>噪声到陆海：</strong>每格的 elevation 从哪来？为什么相邻格子倾向同为陆地或海洋？</li><li><strong>参数到分布：</strong>waterThreshold、scale、倍频参数各自改变分布的什么？</li><li><strong>气候到地形：</strong>temperature 和 humidity 怎样算出来，又怎样落成具体地形？</li></ul><p>读完还要会一件事：不看正文，对一个“调参后的地图会变成什么样”的预测，说出证据在源码的哪一行。</p></div><div><h3>口述第七课的三个结论</h3><ol><li>generateMap 的阶段链顺序你还能排出来吗？陆海和温湿各排第几？</li><li>噪声的 seed 参数与地图 seed 是什么关系？（提示：切 z 层）</li><li>环绕地图的噪声为什么要卷成圆柱？</li></ol><p>这三条是第七课的骨架，本课直接在它们之上展开。答不上来的先回 <a href="0007-map-generation.html">第七课</a>第 2、4 节扫一眼。</p><p class="source"><a href="reference/hexmath.html">地图与坐标速查</a><a href="0007-map-generation.html">第七课：地图生成流水线</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>陆海分布与阈值</td><td>10 分钟</td><td>从噪声值到 baseTerrain 的判定链</td></tr><tr><td>柏林噪声的连续性</td><td>12 分钟</td><td>梯度、fade 与插值怎样保证相邻值接近</td></tr><tr><td>倍频叠加与参数</td><td>12 分钟</td><td>各参数对分布形态的影响方向</td></tr><tr><td>地图类型骨架与温湿</td><td>16 分钟</td><td>类型公式 + 纬度温度 + 区间表匹配</td></tr></tbody></table>
+</section>
+
+<section id="elevation"><h2>1. 陆海分布：一块噪声切一刀</h2>
+<p>第七课的阶段链里，MapLandmassGenerator 是第一道工序。它先从规则集里找出“初始陆地”和“初始水体”两种地形的 <strong>名字</strong>，然后按地图类型算出每格的 elevation（海拔），最后用一条阈值线切开：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapLandmassGenerator.kt 的两个字段与核心判定；①～③ 与右侧对应。</span>
+class MapLandmassGenerator(
+    private val tileMap: TileMap,
+    ruleset: Ruleset,
+    private val randomness: MapGenerationRandomness
+) {
+    <span class="comment">// ① 只拿两种地形的名字：初始陆地 / 初始水体</span>
+    private val landTerrainName = getInitializationTerrain(ruleset, TerrainType.Land)
+    private val waterTerrainName: String = try {
+        getInitializationTerrain(ruleset, TerrainType.Water)
+    } catch (_: Exception) {
+        landTerrainName   <span class="comment">// 纯陆地模组：水体名退化为陆地</span>
+    }
+    private val landOnlyMod: Boolean = waterTerrainName == landTerrainName
+
+    <span class="comment">// ② 水位线：generateLand 开头会被界面参数覆盖</span>
+    private var waterThreshold = 0.0
+
+    <span class="comment">// ③ 全类共用的落笔点：低于阈值写水体名，否则写陆地名</span>
+    private fun spawnLandOrWater(tile: Tile, elevation: Double) {
+        tile.baseTerrain =
+            if (elevation &lt; waterThreshold) waterTerrainName
+            else landTerrainName
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt">本地 MapLandmassGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt#L24">字段 · L24</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt#L99">spawnLandOrWater · L99</a></p></div><div><p>① 构造时只拿两个名字，不拿地形对象——baseTerrain 是字符串字段（第六课），比对和后续 setTerrainTransients 都够用。纯陆地模组找不到水体地形时，waterTerrainName 直接退化为陆地名字，后面整段生成可以跳过。</p><p>② <code>waterThreshold</code> 初始为 0.0，<code>generateLand</code> 开头会被 <code>mapParameters.waterThreshold</code> 覆盖（新游戏高级设置里的 Water level 滑块，范围 −0.1～0.1）。</p><p>③ <code>spawnLandOrWater</code> 是全类共用的落笔点：<strong>elevation 低于 waterThreshold 就写水体名，否则写陆地名</strong>。所有地图类型的差别只在“elevation 怎么算”，落笔只有这一行。</p></div></div>
+<p>最直白的类型是 Perlin：每格算一次噪声，切一刀完事。注意下面这个函数名的来历——<code>generateLand</code> 里有一张 <code>when (tileMap.mapParameters.type)</code>，玩家在新游戏界面选了哪个地图类型（MapType），就分派到对应的 <code>createXxx</code> 私有函数：选 Pangaea 走 createPangaea，选 Archipelago 走 createArchipelago……一共 13 个，全部列在第 4 节的表里：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapLandmassGenerator.createPerlin：整图类型里最简单的一种。</span>
+private fun createPerlin() {
+    <span class="comment">// ① 抽本阶段的 z 层（噪声种子）</span>
+    val elevationSeed = randomness.RNG.nextInt().toDouble()
+    for (tile in tileMap.values) {
+        <span class="comment">// ② 每格只读噪声场，不再动 RNG</span>
+        val elevation = randomness.getPerlinNoise(tile, elevationSeed)
+        spawnLandOrWater(tile, elevation)
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt">本地 MapLandmassGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt#L123">createPerlin · L123</a></p></div><div><p>① 第七课说过：先从 RNG 抽一个整数当本阶段的 z 层（噪声种子）。</p><p>② 循环里每格调 <code>getPerlinNoise</code> 拿一个大约在 −0.55～0.55 之间的值当 elevation，<strong>不再动 RNG</strong>——同一张图内每格的随机性全部来自噪声场本身。这就是“连续分布”的第一层含义：相邻格的噪声值天然接近，所以相邻格倾向落在阈值线的同一边。</p></div></div>
+<p>但一刀切下去未必有好结果——比如水太多。部分类型外面套了一层重试：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapLandmassGenerator.retryLoweringWaterLevel（部分代码）：</span>
+<span class="comment">// 水太多就调低水位线重来，最多 30 次；①～③ 与右侧对应。</span>
+private fun retryLoweringWaterLevel(
+    predicate: (waterPercent: Float) -&gt; Boolean = { it &lt;= 0.7f },
+    function: () -&gt; Unit
+) {
+    var retries = 0
+    while (++retries &lt;= 30) {
+        <span class="comment">// ① 重新生成整张陆海，统计水占比</span>
+        function()
+        val waterPercent = tileMap.values
+            .count { it.baseTerrain == waterTerrainName }
+            .toFloat() / tileMap.values.size
+        <span class="comment">// ② 两处出口：水占比达标，或阈值已低于 -1</span>
+        if (waterThreshold &lt; -1f || predicate(waterPercent)) break
+
+        <span class="comment">// ③ 降低水位线：基础步长 × 水占比 × 重试次数的平方根（加速）</span>
+        waterThreshold -= 0.02 *
+            (waterPercent / 0.7f).coerceAtLeast(1f) *
+            retries.toFloat().pow(0.5f)
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt">本地 MapLandmassGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt#L106">retryLoweringWaterLevel · L106</a></p></div><div><p>① 每轮先跑一遍 function（重新生成整张陆海），再统计水占比。默认接受条件是水不超过 70%。</p><p>② 两处出口：水占比达标，或阈值已经低到 −1 以下（几乎全陆地还做不到就放弃）。注意 function 每轮<strong>重新抽噪声种子</strong>（在类型函数的 lambda 里），所以每轮切的是一块新噪声。</p><p>③ 不满足就往下调阈值重新切：步长 = 0.02 ×（水占比/0.7，至少 1）× 重试次数平方根，后期步子越迈越大。阈值降低意味着“低于阈值才算水”的格子变少——<strong>水位线下降，陆地扩大</strong>。</p></div></div>
+<p>第七课讲过环绕地图的噪声要卷成圆柱（getNoise 的环绕分支），本课不再重复入口，只补一句衔接：卷圆柱只是把每格的平面坐标换成圆柱面上的三维坐标再喂给噪声函数，噪声函数本身（下一节）完全不知道环绕的存在。</p>
+</section>
+
+<section id="noise"><h2>2. 柏林噪声：为什么连续</h2>
+<p>连续分布的技术根基是柏林噪声（Perlin noise）。Unciv 没有引库，直接搬了 Rosetta Code 的 Kotlin 实现（文件头注明 version 1.1.3）。它是一段大约 130 行的自包含代码：</p>
+<div class="paired"><div><pre><code><span class="comment">// Perlin.kt（object Perlin，节选骨架）；①～④ 与右侧对应。</span>
+object Perlin {
+    <span class="comment">// ① 256 个数的固定置换表 + 梯度表 grad3 + 加长表 p</span>
+    private val permutation = intArrayOf(151, 160, 137, …)
+    private val grad3 = arrayOf(
+        intArrayOf(1,1,0), intArrayOf(-1,1,0), …)
+
+    <span class="comment">// ② 单倍频：一次 3D 柏林噪声，范围约 (-1, 1)</span>
+    fun noise(x: Double, y: Double, z: Double): Double
+
+    <span class="comment">// ③ 多倍频叠加，见第 3 节</span>
+    fun noise3d(x: Double, y: Double, z: Double,
+                nOctaves: Int = 3, …): Double
+    fun ridgedNoise3d(…): Double
+
+    <span class="comment">// ④ 三个私有辅助函数，本节后半逐一展开</span>
+    private fun fade(t: Double) = t*t*t*(t*(t*6-15)+10)
+    private fun lerp(t: Double, a: Double, b: Double) =
+        a + t * (b - a)
+    private fun grad3(hash: Int, x: Double, y: Double, z: Double): Double
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/Perlin.kt">本地 Perlin.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/Perlin.kt#L9">object Perlin · L9</a><a href="https://rosettacode.org/wiki/Perlin_noise#Kotlin">Rosetta Code: Perlin noise (Kotlin)</a></p></div><div><p>① 两个数据部件：<code>permutation</code> 是 0～255 的一个固定打乱顺序（写死在源码里，所有 Unciv 安装都一样）；<code>grad3</code> 是 12 个方向向量。它们只用于给格子角做哈希。</p><p>② <code>noise</code> 对一个三维点返回一个近似连续的值，是后面一切的地基。</p><p>③ 外面两个函数是倍频包装：noise3d 把多个频率叠起来，ridgedNoise3d 变体专造山脊状条纹。它们的差别第 3 节展开。</p><p>④ 三个私有函数是单倍频算法的零件，下面两段逐一展开。“写死的置换表”意味着噪声场对所有玩家相同——两张图不同，靠的是种子选了噪声空间的哪个区域（z 层和 offset），而不是换一张噪声场。</p></div></div>
+<p>单倍频 noise 的算法分四步。这段先看骨架与预处理，③④ 的插值细节在下一段展开：</p>
+<div class="paired"><div><pre><code><span class="comment">// Perlin.noise（骨架）：找到点所在的单位立方体，</span>
+<span class="comment">// 再算出点在立方体内的相对位置。</span>
+fun noise(x: Double, y: Double, z: Double): Double {
+    <span class="comment">// ① 单位立方体的左下角坐标，and 255 折回 0~255</span>
+    val xi = floor(x).toInt() and 255
+    val yi = floor(y).toInt() and 255
+    val zi = floor(z).toInt() and 255
+
+    <span class="comment">// ② 点在立方体内的相对位置（0~1 的小数部分）</span>
+    val xx = x - floor(x)
+    val yy = y - floor(y)
+    val zz = z - floor(z)
+
+    <span class="comment">// ③ fade 曲线（见下）</span>
+    val u = fade(xx)
+    val v = fade(yy)
+    val w = fade(zz)
+    <span class="comment">// ④ 八个角做哈希与三线性插值（见下）</span>
+    …
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/Perlin.kt">本地 Perlin.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/Perlin.kt#L81">noise · L81</a></p></div><div><p>① 把三维噪声空间想成边长 1 的立方体网格。<code>floor</code> 取整找到点落在哪个格子里，<code>and 255</code> 让格子的整数坐标在置换表长度内循环——这也是第七课“噪声每 256 个单位重复”结论的出处。</p><p>② <code>xx/yy/zz</code> 是点在格子内的小数位置。</p><p>③ 接下来先把三个小数位置各过一遍 fade 曲线——fade 本身的形状见下一段。</p><p>④ 最后是八个角做哈希与三线性插值，同样见下一段。注意：坐标在哪个格子只影响哈希取哪些角；<strong>点在格子内怎么移动，只通过插值影响输出</strong>——这是连续性的来源。</p></div></div>
+<p>③ 的 fade 和 ④ 的插值是理解“为什么连续”的关键：</p>
+<div class="paired"><div><pre><code><span class="comment">// Perlin.kt 的三个私有函数；①～③ 与右侧对应：</span>
+<span class="comment">// ① 平滑曲线：两端导数为 0，压平格子边缘</span>
+private fun fade(t: Double) = t*t*t*(t*(t*6-15)+10)
+
+<span class="comment">// ② 普通线性插值</span>
+private fun lerp(t: Double, a: Double, b: Double) =
+    a + t * (b - a)
+
+<span class="comment">// ③ 角点哈希选方向向量，与“点到该角的偏移”做点积</span>
+private fun grad3(hash: Int, x: Double, y: Double, z: Double): Double {
+    val h = hash and 15
+    return x * grad3[h][0] +
+           y * grad3[h][1] +
+           z * grad3[h][2]
+}
+
+<span class="comment">// Perlin.noise（第 4 步，部分代码）：</span>
+<span class="comment">// ④ 先哈希出 8 个角，再做三层 lerp 的三线性插值。</span>
+val a  = p[xi] + yi
+val aa = p[a] + zi
+val ab = p[a + 1] + zi
+val b  = p[xi + 1] + yi
+val ba = p[b] + zi
+val bb = p[b + 1] + zi
+
+return lerp(w,
+    lerp(v,
+        lerp(u, grad3(p[aa], xx, yy, zz),
+                grad3(p[ba], xx-1, yy, zz)),
+        lerp(u, grad3(p[ab], xx, yy-1, zz),
+                grad3(p[bb], xx-1, yy-1, zz))),
+    lerp(v, <span class="comment">/* 上面一层 z+1 的四个角，结构相同 */</span>
+        …))</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/Perlin.kt">本地 Perlin.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/Perlin.kt#L124">fade/lerp/grad3 · L124</a></p></div><div><p>① <code>fade</code> 是一条特殊曲线：t=0 和 t=1 时值恰好是 0 和 1，且两端的一阶、二阶导数都是 0。它把小数位置“压平”到边缘，避免插值在格子边界处出现折角。</p><p>② <code>lerp</code> 是普通线性插值。</p><p>③ <code>grad3</code> 按角点的哈希选一个固定方向向量，再和“点到该角的偏移”做点积——8 个角各得一个基准值。</p><p>④ 三层嵌套的 lerp 把 8 个角的基准值按 fade 后的位置加权混合成一个数。连续性就在这里：点在格子内滑动时，xx/yy/zz 连续变化，fade 和 lerp 都是连续函数，输出自然连续。<strong>跨过格子边界也不跳变</strong>——同一条边界两侧的两个格子，fade 压到 0 和 1，插值恰好落在边界角的同一个基准值上。</p></div></div>
+<aside class="callout"><strong>Godot 对照：噪声开箱即用</strong><p>Unciv 手写 Perlin 是因为 core 模块不依赖引擎。Godot 里 <code>FastNoiseLite</code> 内置 Perlin / Simplex / Cellular 等类型，frequency、octaves、lacunarity、persistence 参数一一对应本课的概念，还带无缝 tileable 选项（等价于 Unciv 的卷圆柱思路，Godot 在 2D 平面上做周期化）。写自己的生成器时，先在编辑器里调 FastNoiseLite 参数预览纹理，找到满意的形态再搬数值——比读代码猜分布快得多。Godot 4.x 均适用。</p></aside>
+</section>
+
+<section id="octaves"><h2>3. 倍频叠加与参数</h2>
+<p>单倍频噪声只有格子尺度的起伏。真实地形要“大轮廓 + 小细节”，noise3d 用倍频叠加实现：</p>
+<div class="paired"><div><pre><code><span class="comment">// Perlin.noise3d：多个倍频（octave）加权求和。</span>
+fun noise3d(x: Double, y: Double, z: Double,
+            nOctaves: Int = 3,
+            persistence: Double = 0.5,
+            lacunarity: Double = 2.0,
+            scale: Double = 10.0): Double {
+    var freq = 1.0
+    var amp = 1.0
+    var max = 0.0
+    var total = 0.0
+    repeat(nOctaves) {
+        <span class="comment">// ① 每个倍频：坐标乘 freq/scale 再采样</span>
+        total += amp * noise(x * freq / scale,
+                             y * freq / scale,
+                             z * freq / scale)
+        max += amp
+        <span class="comment">// ② 频率翻倍、振幅减半</span>
+        freq *= lacunarity
+        amp *= persistence
+    }
+    <span class="comment">// ③ 除以振幅总和归一化</span>
+    return total / max
+}
+
+<span class="comment">// MapGenerationRandomness.getPerlinNoise 的默认参数：</span>
+<span class="comment">// ④ nOctaves=6, persistence=0.5, lacunarity=2.0, scale=30.0</span></code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/Perlin.kt">本地 Perlin.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056dc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/Perlin.kt#L40">noise3d · L40</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056dc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerationRandomness.kt#L33">getPerlinNoise · L33</a></p></div><div><p>① 每一轮（一个“倍频”）把坐标乘上 <code>freq/scale</code> 再采一次样。freq 越高，单位距离跨过越多格子，噪声变化越快——这就是“频率”。</p><p>② 每轮结束后 freq 乘 lacunarity（默认 2，频率翻倍）、amp 乘 persistence（默认 0.5，振幅减半）。</p><p>③ 最后除以 <code>max</code>（振幅总和）归一化，输出仍在 −1～1 附近。直觉：第 1 个倍频画大轮廓，第 2 个在轮廓上加一半幅度的中起伏，第 3 个再加四分之一幅度的小颗粒……<strong>频率越来越高、贡献越来越小</strong>。</p><p>④ 实际调用走 getPerlinNoise 的默认参数：6 个倍频、scale 30，所以陆地有大块连贯区域，边缘又不太光滑。</p></div></div>
+<p>ridged 变体只改一行——取绝对值再叠加，山脊就出来了：</p>
+<div class="paired"><div><pre><code><span class="comment">// Perlin.ridgedNoise3d：与 noise3d 相同的骨架，</span>
+<span class="comment">// ① 唯一的差别在每个倍频采样后取 abs。</span>
+repeat(nOctaves) {
+    var value = noise(x * freq / scale,
+                      y * freq / scale,
+                      z * freq / scale)
+    value = abs(value)          <span class="comment">// ② ← 唯一的差别</span>
+    total += amp * value
+    …
+}
+return total / max</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/Perlin.kt">本地 Perlin.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/Perlin.kt#L58">ridgedNoise3d · L58</a></p></div><div><p>① 骨架与 noise3d 完全相同：逐倍频采样、逐轮调 freq/amp、最后归一化。</p><p>② 普通噪声在 0 附近穿过时变号；取 abs 后，穿过 0 的位置变成尖峰——原噪声的等高线变成了“山脊线”。叠加多个倍频后，脊线纵横交错，像群岛或山脉的走向。</p><p>调用点：Archipelago、Lakes、SmallContinents 用 ridged（要碎、要脊），大陆类和 Perlin 用普通 noise3d。给哪些类型用哪种噪声，第 4 节的表里列全。</p></div></div>
+<p>四个参数对分布形态的影响方向，整理成一张表。这是本课“预测调整的影响”的核心：</p>
+<table><thead><tr><th scope="col">参数</th><th scope="col">控制什么</th><th scope="col">调大后</th><th scope="col">调小后</th></tr></thead><tbody>
+<tr><td><code>scale</code></td><td>坐标除以的基数（观察距离）</td><td>特征变大：整块大陆或大洋</td><td>特征变小：斑点状碎岛</td></tr>
+<tr><td><code>nOctaves</code></td><td>叠加几层细节</td><td>边缘更破碎、更自然</td><td>边缘更平滑、更圆润</td></tr>
+<tr><td><code>persistence</code></td><td>高频层的振幅衰减</td><td>细节更明显</td><td>更接近纯大轮廓</td></tr>
+<tr><td><code>lacunarity</code></td><td>相邻倍频的频率倍数</td><td>各层频率差距拉大</td><td>各层频率接近，层次感减弱</td></tr>
+<tr><td><code>waterThreshold</code></td><td>陆海判定线（界面滑块 ±0.1）</td><td>海拔低于更高阈值 → 水变多</td><td>陆地变多</td></tr>
+</tbody></table>
+<p>最后一个问题是<strong>地图大小与 scale 的关系</strong>。scale 是“多少格走完一个起伏周期”，地图变大而 scale 不变，大图上就能塞下更多个周期——结果大陆数量翻倍、每块相对变小。源码里两种做法都有，先看一个代入计算的例子。</p>
+<p><strong>做法一：scale 跟着地图变大（Fractal 类型）。</strong>createFractal 先算 <code>ratio = maxdim / 32</code>，其中 maxdim 是地图的 maxLatitude 和 maxLongitude 里较大的一个（TileMap 的两个 lazy 属性，按实际地块取绝对值最大），再乘 30 当 scale。代入两种尺寸（第六课的 MapSize 预设，以下数字经 Kotlin REPL 用真实 TileMap 实测）：</p>
+<pre><code>Small（33×21）：maxdim = 21 → ratio ≈ 0.66 → scale ≈ 20 → 21 / 20 ≈ 1.1 个周期
+Huge （87×57）：maxdim = 57 → ratio ≈ 1.78 → scale ≈ 53 → 57 / 53 ≈ 1.1 个周期</code></pre>
+<p>maxdim 放大了 2.7 倍，scale 也放大 2.7 倍，两者相除不变：<strong>不管什么尺寸的图，都只装得下约一个大起伏周期</strong>。Huge 图的大陆和 Small 图一样是“两三块”，只是每块的绝对格数更多。源码注释原话正是 “change scale depending on map size so that average number of continents stay the same”（按地图尺寸改 scale，让平均大陆数保持不变）。</p>
+<p><strong>做法二：scale 锁死，不随地图变（Boreal 类型的湖）。</strong>createBoreal 里有两层噪声：大轮廓层影响海岸线，scale = 3×√radius，随图变大（Small 图 radius 15 时约 12，Huge 图 radius 40 时约 19）；湖层用 ridged 噪声，scale 写死 5.0——不管哪种尺寸的图，<strong>湖永远是“五格尺度的洼地”</strong>，图越大湖越多、单个大小不变。源码注释给的动机是湖是河流的源头（第 9 课），湖的大小如果跟着地图缩放，大图的湖会连片成海、小图的湖会缩成一格，河流生成就没有稳定的发源地了。</p>
+<p>两种做法的取舍：想要“分布的<strong>块数</strong>不随图变”（大陆数），让 scale 跟尺寸走；想要“单个特征的<strong>绝对大小</strong>不随图变”（湖、局部地物），把 scale 锁死。同一个类里两种策略并存，各管各的层。做自己的地图生成时，这是每个噪声层都要问一遍的问题。</p>
+<p>waterThreshold 的滑块范围只有 −0.1～0.1，因为噪声输出集中在 0 附近（getPerlinNoise 注释：多数值在 ±0.55 内、约 28% 低于 −0.1），小幅度移动阈值就能显著改变水陆比。</p>
+</section>
+
+<section id="types"><h2>4. 十三种地图类型的骨架</h2>
+<p>上一节说过，玩家在界面选的每个地图类型（MapType）都对应一个 <code>createXxx</code> 函数。这 13 个函数共享同一套骨架：抽种子 → 每格算 elevation → spawnLandOrWater 落笔。逐个讲会重复，先说清楚<strong>它们只在两件事上不同</strong>，再看表。</p>
+<p>第一件：<strong>elevation 的来源</strong>。要么主要靠噪声（Perlin、Archipelago），要么噪声只当扰动、主体是一条确定性公式（Spiral 的螺旋线、Boreal 的纬度曲线），要么噪声再叠一层几何“提升/压低”来保证宏观形状（Pangaea 的中央大陆、FourCorners 的四角）。第二件：<strong>要不要重试</strong>——第 1 节的 retryLoweringWaterLevel 只套在对水占比或大陆数有硬要求的类型上。</p>
+<p>表格的读法：<strong>第一列</strong>是源码里的函数名，括号里是对应的界面选项；<strong>第二列</strong>说 elevation 主体用哪种噪声（普通 = noise3d，ridged = 山脊状变体，见第 3 节）；<strong>第三列</strong>用一句话概括 elevation 公式——每一项你都能在源码里找到对应行，两个配对走读的例子在表后；<strong>第四列</strong>是有没有套重试。按骨架分四组，每组的预期形态写在组名里。</p>
+<table><thead><tr><th scope="col">类型函数（界面选项）</th><th scope="col">噪声</th><th scope="col">elevation = …（一句话）</th><th scope="col">重试</th></tr></thead><tbody>
+<tr><td colspan="4"><strong>第一组 · 纯噪声</strong>——形态完全交给噪声场，随机性最强</td></tr>
+<tr><td>createPerlin（Perlin）</td><td>普通</td><td>纯噪声，一刀切</td><td>无</td></tr>
+<tr><td>createFractal（Fractal）</td><td>普通</td><td>噪声（scale 随图变，见第 3 节）+ 边缘压低</td><td>有</td></tr>
+<tr><td colspan="4"><strong>第二组 · ridged 噪声</strong>——取 abs 的山脊状噪声，切出来是窄条与碎片，适合群岛和多湖</td></tr>
+<tr><td>createArchipelago（Archipelago 群岛）</td><td>ridged</td><td>ridged 噪声（阈值先 +0.25，水位线抬高）</td><td>无</td></tr>
+<tr><td>createSmallContinents（Small Continents）</td><td>ridged</td><td>ridged 噪声 + 边缘压低</td><td>有</td></tr>
+<tr><td>createLakes（Lakes 多湖）</td><td>ridged</td><td>0.3 − ridged 噪声（反过来让水体占多数）</td><td>无</td></tr>
+<tr><td colspan="4"><strong>第三组 · 噪声 + 几何提升/压低</strong>——噪声提供随机，一个按坐标算的“形状函数”保证宏观格局</td></tr>
+<tr><td>createPangaea（Pangaea 盘古大陆）</td><td>普通</td><td>噪声 ×¾ + 中央椭圆提升 ×¼</td><td>有（条件更严）</td></tr>
+<tr><td>createInnerSea（Inner Sea 内海）</td><td>普通</td><td>噪声 − 中央椭圆压低（中间挖海）</td><td>无</td></tr>
+<tr><td>createContinentAndIslands（Continent and Islands）</td><td>普通</td><td>(噪声 + 半图变换)/2：一半是大陆，另一半压成群岛</td><td>无</td></tr>
+<tr><td>createTwoContinents（Two Continents）</td><td>普通</td><td>(噪声 + 半球变换)/2：中线上压一条海</td><td>无</td></tr>
+<tr><td>createThreeContinents（Three Continents）</td><td>普通</td><td>(噪声 + 三区变换)/2</td><td>无</td></tr>
+<tr><td>createFourCorners（Four Corners 四角）</td><td>普通</td><td>噪声/2 + 四角变换/2：四个角落各一块陆地</td><td>无</td></tr>
+<tr><td colspan="4"><strong>第四组 · 确定性公式 + 噪声扰动</strong>——主体是纯数学公式，噪声只负责揉掉完美感</td></tr>
+<tr><td>createBoreal（Boreal 北方冻土）</td><td>普通+ridged</td><td>北降纬度曲线为基线，减湖噪声，加大轮廓噪声</td><td>无</td></tr>
+<tr><td>createSpiral（Spiral 螺旋）</td><td>普通</td><td>螺旋函数 sin(角度−旋转×距离) + 小幅噪声</td><td>无</td></tr>
+</tbody></table>
+<p>拿着这张表回到新游戏界面：每个下拉选项对应一行，第二、三列就是你选它时背后发生的事。下面挑两组各走读一个代表，其余的按表索骥自己读，套路完全一样。先走第三组的 Pangaea——几何提升是怎样把大洲“压”出来的：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapLandmassGenerator.createPangaea（部分代码）；①～④ 与右侧对应。</span>
+retryLoweringWaterLevel(predicate = { waterPercent -&gt;
+    <span class="comment">// ① 恰好一块“大”陆地 + 水不超过 70%</span>
+    val largeContinents = tileMap.continentSizes.values
+        .count { it &gt; largeContinentThreshold }
+    largeContinents == 1 &amp;&amp; waterPercent &lt;= 0.7f
+}) {
+    <span class="comment">// ② 每轮重试重新抽噪声种子</span>
+    val elevationSeed = randomness.RNG.nextInt().toDouble()
+    for (tile in tileMap.values) {
+        var elevation = randomness.getPerlinNoise(tile, elevationSeed)
+        <span class="comment">// ③ 噪声占 3/4，中央椭圆提升占 1/4</span>
+        elevation = elevation * (3 / 4f)
+                + getEllipticContinent(tile) / 4
+        spawnLandOrWater(tile, elevation)
+        tile.setTerrainTransients()
+    }
+    <span class="comment">// ④ 重新编号大洲，为了下一轮能数大洲</span>
+    tileMap.assignContinents(Reassign)
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt">本地 MapLandmassGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt#L256">createPangaea · L256</a></p></div><div><p>① Pangaea 的目标写在 predicate 里：整张图恰好一块大陆地，且水不超过 70%。它比默认重试苛刻——光水少不够，还得连成一片。</p><p>② 每轮重试都重新抽噪声种子（lambda 每次执行），切的是新噪声。</p><p>③ elevation 是两股力量的加权平均：噪声（随机性，占 ¾）加 <code>getEllipticContinent</code>（几何中心提升，占 ¼）。后者按到地图中心的椭圆距离给中心加分、边缘扣分，把大陆“压”向中央。</p><p>④ 循环里 setTerrainTransients 让 continentSizes 可查，循环外 assignContinents 重新编号大洲——都是为了下一轮 predicate 能数出“几块大陆”。这是前面讲的“阶段链依赖”在重试循环内部的迷你版本。</p></div></div>
+<p>再走第四组的 Spiral——确定性公式提供形状，噪声只当佐料：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapLandmassGenerator.createSpiral（部分代码）；①～④ 与右侧对应。</span>
+for (tile in tileMap.values) {
+    <span class="comment">// ① 第六课的屏幕坐标，换算成 -1..1 的方形坐标</span>
+    val coordinate = HexMath.hex2WorldCoords(tile.position)
+    val x = coordinate.x / coordinateDivisor * flipX
+    val y = coordinate.y / coordinateDivisor * flipY
+
+    <span class="comment">// ② 螺旋函数：角度 - 旋转量×距离，输出 -1..+1</span>
+    var elevation = sin(atan2(y, x)
+            - spinFactor * hypot(x, y))
+
+    elevation *= 0.25   <span class="comment">// ③ 压窄范围</span>
+    elevation += 0.15   <span class="comment">// ③ 抬到水面之上</span>
+    elevation += 0.18 * randomness.getPerlinNoise( <span class="comment">// ④ 噪声扰动</span>
+        tile, elevationSeed, scale = noiseScale)
+    spawnLandOrWater(tile, elevation)
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt">本地 MapLandmassGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056dc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt#L198">createSpiral · L198</a></p></div><div><p>① 先把每格换成屏幕坐标再归一化（第六课的 hex2WorldCoords 在生成器里复用）。</p><p>② 然后套一条纯数学的螺旋函数：sin(角度 − 旋转×距离)。沿半径走，值周期性起伏——一环陆地、一环海洋。spinFactor 随地图半径的平方根增长，大图转得更紧。</p><p>③ 两行缩放把数学输出压窄范围、抬到水面之上。</p><p>④ 噪声只乘 0.18 加进去，作用是把完美的数学螺旋揉出自然感。两个 flipX/flipY 从 RNG 抽，只决定螺旋镜像方向——同一颗种子永远同一个方向的螺旋，不同种子可能水平/竖直翻转。</p></div></div>
+<p>表里没走读的类型补几句线索，按表索骥时用得上：TwoContinents 家族用 <code>getLonLatFactors</code> 算每格到中线的距离，把一半压成海（环绕图还要在边缘再压一条，防止分界线落在接缝上）；FourCorners 用两个因子的几何平均，四角各得一块；Archipelago 先把 waterThreshold 加 0.25 再切，水位线抬高，岛屿自然更碎；Lakes 用 0.3 减 ridged 噪声，让水体占多数。Boreal 是第四组的代表之一：elevation 基线是一条随纬度向北指数下降的曲线（南边海拔高、越往北越低），配第 3 节讲过的两层不同 scale 的噪声——锁死 scale 的湖层和跟尺寸走的大轮廓层——整张图大部分是冻土带。它的温度公式也特殊，下一节还会遇到。</p>
+</section>
+
+<section id="climate"><h2>5. 温度与湿度怎样定地形</h2>
+<p>陆海只是骨架。阶段链第 2 步 applyHumidityAndTemperature 给每格写两个数，再由规则集决定它是草原还是荒漠。先看参数读取和地形候选的准备：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapGenerator.applyHumidityAndTemperature（准备部分）；①～④ 与右侧对应。</span>
+private fun applyHumidityAndTemperature(tileMap: TileMap) {
+    <span class="comment">// ① 湿度、温度各抽一个 z 层</span>
+    val humiditySeed = randomness.RNG.nextInt().toDouble()
+    val temperatureSeed = randomness.RNG.nextInt().toDouble()
+
+    <span class="comment">// ② 重建矩阵缓存（第六课的重入校验）</span>
+    tileMap.setTransients(ruleset)
+
+    <span class="comment">// ③ 三个界面参数 + 湿度补偿</span>
+    val scale = tileMap.mapParameters.tilesPerBiomeArea.toDouble()
+    val temperatureintensity =
+        tileMap.mapParameters.temperatureintensity
+    val temperatureShift =
+        tileMap.mapParameters.temperatureShift
+    <span class="comment">// 温度整体偏暖时，湿度向干燥侧补偿</span>
+    val humidityShift =
+        if (temperatureShift &gt; 0) -temperatureShift / 2 else 0f
+
+    <span class="comment">// ④ 候选地形：陆地/海岸/海洋三组；山脉类跳过</span>
+    val landTerrains = baseTerrainPicker.filter {
+        it.terrain.type == TerrainType.Land
+        &amp;&amp; !it.terrain.impassable &amp;&amp; !it.isRough &amp;&amp; !it.rareFeature }
+    …
+    <span class="comment">// 山脉类地形（OccursInChains）跳过本阶段，留给第 3 步</span>
+    val elevationTerrains = baseTerrainPicker
+        .filter { it.occursInChains }.mapTo(mutableSetOf()) { it.name }</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L512">applyHumidityAndTemperature · L512</a></p></div><div><p>① 和陆海阶段一样，先从 RNG 抽两个 z 层：湿度和温度各一块噪声场。</p><p>② 第七课提过这里的 setTransients 调用——第六课“重入校验”说的就是它。</p><p>③ 三个参数直接来自新游戏高级设置：Biome size 是噪声的 scale（值越大地块越成片）；Temperature intensity 和 shift 稍后进温度公式；湿度补偿 humidityShift 在温度偏暖时把湿度推向干燥侧。</p><p>④ 候选表按“当前是什么基础地形”分三组：陆地格只在 landTerrains 里挑，海只在 coast/ocean 组里挑。山地类（有 OccursInChains，如 Mountain）整组跳过——它们属于阶段链第 3 步的 MapElevationGenerator。</p></div></div>
+<p>主循环里每格四个动作：算湿度、算期望温度、混噪声、选地形：</p>
+<div class="paired"><div><pre><code><span class="comment">// applyHumidityAndTemperature 主循环（每格）：</span>
+for (tile in tileMap.values.asSequence()) {
+    if (tile.baseTerrain in elevationTerrains) continue
+
+    <span class="comment">// ① 湿度：单倍频噪声，线性映射到 0..1</span>
+    val humidityRandom = randomness.getPerlinNoise(
+        tile, humiditySeed, scale = scale, nOctaves = 1)
+    val humidity = ((humidityRandom + 1.0) / 2.0
+        + humidityShift).coerceIn(0.0..1.0)
+    tile.humidity = humidity
+
+    <span class="comment">// ② 期望温度：由纬度决定（见下一段）</span>
+    val expectedTemperature = getExpectedTemperature(tile)
+
+    <span class="comment">// ③ 混合：5 份纬度 + 1 份噪声，再过幂曲线和 shift</span>
+    val randomTemperature = randomness.getPerlinNoise(
+        tile, temperatureSeed, scale = scale, nOctaves = 1)
+    var temperature =
+        (5.0 * expectedTemperature + randomTemperature) / 6.0
+    temperature = abs(temperature)
+        .pow(1.0 - temperatureintensity) * temperature.sign
+    temperature = (temperature + temperatureShift)
+        .coerceIn(-1.0..1.0)
+    tile.temperature = temperature
+    <span class="comment">// ④ 按温湿选地形（见下一段）</span>
+    …
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056dc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L556">主循环 · L556</a></p></div><div><p>① 湿度最简单：单倍频噪声（nOctaves=1，没有细节叠加）从 −1..1 折到 0..1，加上湿度偏移后截断。湿度图是纯噪声场，与纬度无关。</p><p>② 期望温度由纬度决定，<code>getExpectedTemperature</code> 见下一段。</p><p>③ 温度是“<strong>纬度为体、噪声为用</strong>”：期望温度占 5/6，同 scale 的单倍频噪声占 1/6。所以温度带整体跟着纬度走，噪声让带状边界变曲折。幂曲线那行是 Temperature intensity 的作用点：intensity 越大（滑块 0.4→0.8），指数 1−intensity 越小，|t| 的幂越接近 1——中间值被推向两端，<strong>冷更冷、热更热</strong>（南美式极端气候）。shift 则在最后整体平移温度，正数变暖。</p><p>④ 按温湿选地形，见本节的最后一段。</p></div></div>
+<p>期望温度本身只是一行公式（boreal 类型除外）：</p>
+<div class="paired"><div><pre><code><span class="comment">// applyHumidityAndTemperature 内的 getExpectedTemperature（部分）：</span>
+fun getExpectedTemperature(tile: Tile): Double {
+    <span class="comment">// ① 纬度归一化到 -1（南）.. +1（北）</span>
+    val normalizedLatitude =
+        if (shape == flatEarth) 2 * getTileRadius(tile, tileMap) - 1
+        else tile.latitude.toDouble() / tileMap.maxLatitude
+
+    <span class="comment">// ② 纬度 → 温度</span>
+    return when (tileMap.mapParameters.type) {
+        <span class="comment">// 大部分地图：赤道 +1，两极 -1 的折线</span>
+        else -&gt; 1.0 - 2.0 * abs(adjustedLatitude)
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056dc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L534">getExpectedTemperature · L534</a></p></div><div><p>① 纬度归一化：普通地图把第六课的 latitude=x+y 除以 maxLatitude；flatEarth 没有南北极，换成“到地图中心的半径”（冰墙世界的中心就是北极）。</p><p>② 普通地图的期望温度是 <code>1 − 2|纬度|</code>：赤道最热（+1），两极最冷（−1），中间线性过渡。boreal 类型换成一条北部陡降到 −1 的指数曲线，让整张图偏冷。期望温度只是基准，主循环第 ③ 步的噪声和变换才决定每格的最终值。</p></div></div>
+<p>温湿算完，选地形的依据不在代码里，而在 jsons 的规则定义里。TerrainOccursRange 把它们变成可查询的对象：</p>
+<div class="paired"><div><pre><code><span class="comment">// android/assets/jsons/Civ V - Vanilla/Terrains.json（Snow 的前几条）：</span>
+<span class="comment">// ① 每条 “Occurs at …” 规则是一个温湿矩形</span>
+"uniques": [
+    "Occurs at temperature between [-1] and [-0.9] and humidity between [0] and [1]",
+    "Occurs at temperature between [-0.9] and [-0.8] and humidity between [0] and [0.8]",
+    "Occurs at temperature between [-0.8] and [-0.7] and humidity between [0] and [0.6]",
+    …]
+
+<span class="comment">// MapGenerator.TerrainOccursRange（骨架）：</span>
+<span class="comment">// ② 规则被解析成温度/湿度的上下界</span>
+internal class TerrainOccursRange(
+    val terrain: Terrain,
+    val tempFrom: Float, val tempTo: Float,
+    val humidFrom: Float, val humidTo: Float,
+    val isConstrained: Boolean
+) {
+    <span class="comment">// ③ 温湿都落在半开区间 (From, To] 内才匹配</span>
+    fun matchesHumidity(tile: Tile, overrideTileTemp: Double) =
+        tempFrom &lt; overrideTileTemp &amp;&amp; overrideTileTemp &lt;= tempTo &amp;&amp;
+            humidFrom &lt; (tile.humidity ?: 0.0) &amp;&amp;
+            (tile.humidity ?: 0.0) &lt;= humidTo
+}</code></pre><p class="source"><a href="../../android/assets/jsons/Civ V - Vanilla/Terrains.json">本地 Terrains.json · Snow 定义</a><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056dc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L71">TerrainOccursRange · L71</a></p></div><div><p>① 第三课讲过 unique 的解析，这里直接看数据：Snow 的每条 “Occurs at …” 规则是一个温湿矩形——温度 −1～−0.9 时任何湿度都行，−0.9～−0.8 时只到 0.8 湿度……五条矩形拼出 Snow 的领地：越冷可容忍的湿度越宽。每种地形都有这样一组矩形，拼在一起近似覆盖整个温湿平面（Grassland 管湿润温带、Desert 管干热、Tundra 管湿冷……）。</p><p>② <code>TerrainOccursRange</code> 把这些 unique 变成可查询对象，字段就是温湿上下界。</p><p>③ 判定是半开区间 (From, To]，靠 toFloatMakeInclusive 把边界值微调，避免两块矩形都不含边界点。</p></div></div>
+<p>最后一步，把温湿落进矩形：</p>
+<div class="paired"><div><pre><code><span class="comment">// applyHumidityAndTemperature 主循环的选地形部分；①～④ 与右侧对应。</span>
+<span class="comment">// ① 先按水陆选候选组</span>
+val terrains =
+    if (tile.isLand) landTerrains
+    else if (tile.getBaseTerrain().isCoast) coastTerrains
+    else oceanTerrains
+<span class="comment">// ② 组内过滤温湿匹配，多个候选随机挑一个</span>
+val matchingTerrain = terrains
+    .filter { it.matchesTempAndTerrain(tile) }
+    .ifEmpty { terrains }        <span class="comment">// ③ 全不匹配就整组随机</span>
+    .randomOrNull(randomness.RNG)
+
+if (matchingTerrain != null) {
+    <span class="comment">// ④ 写回并刷新缓存</span>
+    tile.baseTerrain = matchingTerrain.name
+    tile.setTerrainTransients()
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">本地 MapGenerator.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056dc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt#L590">选地形 · L590</a></p></div><div><p>① 先按水陆选组：陆地格在 landTerrains（平原、草原、荒漠、冻土、雪原等基础地形，山地已排除）里选，海在海岸/海洋组里选。</p><p>② 组内过滤出温湿都匹配的地形。匹配多个时<strong>用 RNG 随机挑一个</strong>——注意这是整图生成里少数“每格直接动 RNG”的地方（前两阶段每格只读噪声场）。因此温湿相同且都匹配的两个候选，选哪个由 RNG 序列决定，仍受种子控制。</p><p>③ 全都不匹配时 ifEmpty 兜底整组随机，保证每格都有地形。</p><p>④ 写完 baseTerrain 立即 setTerrainTransients，让 isLand/isCoast 等缓存跟上（下一格选组要用）。</p></div></div>
+<p>温度和湿度是 <code>Tile</code> 上的 <code>@Transient</code> 字段（注释写着 For map generation use only）：它们只在生成期间存在，选完地形就不再参与运行时逻辑——但会整个保留在内存里直到生成结束，供 spawnVegetation、spawnIce 等后续阶段继续查询（植被和冰都按同样的温湿匹配）。存档里没有这两个字段。</p>
+<aside class="callout tradeoff"><strong>取舍：为什么地形匹配放在规则集而不写死在代码里</strong><p>把“什么温湿出什么地形”做成 jsons 里的 TileGenerationConditions unique，模组作者不改一行 Kotlin 就能重画气候带：加一种红树林地形、把荒漠推得更湿……匹配代码（TerrainOccursRange）只提供矩形判定这一种原语。代价是矩形只能近似真实生物群的弯曲边界，所以每个地形要写好几条 unique 手工拼形状——你在 Snow 的五条规则里看到的就是这种“用矩形拼曲线”的手艺。另外温湿匹配地形在 <code>ifEmpty { terrains }</code> 处有兜底，模组定义的矩形覆盖不全也不会生成失败，只是退化成随机。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>陆海 = 噪声 + 阈值：每格一个 elevation，低于 waterThreshold 落水；所有地图类型只改 elevation 公式，不改这条判定线。</strong></li><li><strong>柏林噪声靠“格子角哈希 + fade 平滑 + 三线性插值”保证连续：点连续移动，输出连续变化；置换表写死，靠种子选噪声空间的切面。</strong></li><li><strong>noise3d 叠多个倍频：频率逐层翻倍、振幅逐层减半，大轮廓加小细节；ridged 变体取绝对值，等高线变山脊。</strong></li><li><strong>scale 管特征大小、nOctaves 管边缘破碎度、persistence 管细节强度、waterThreshold 管水陆比——调参前先想改的是哪个量。</strong></li><li><strong>温度 = 5/6 纬度折线 + 1/6 噪声，再过 intensity 幂曲线和 shift；湿度 = 纯单倍频噪声折到 0..1。</strong></li><li><strong>地形匹配在规则集：每个地形一组“温湿矩形”unique，格子的 (temperature, humidity) 落进谁的矩形就变谁；全不匹配则整组随机兜底。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；不看正文说出参数影响方向、讲清温湿公式，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="c"><fieldset><legend>1. spawnLandOrWater 按 elevation 判定水陆时，用的是什么比较？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="比较的对象就是 waterThreshold，但方向反了：低于阈值才是水，高于阈值是陆地。"><span>海拔高过水位线</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="elevation 只和 waterThreshold 一个数比较； continentSizes 是 Pangaea 重试时数大洲用的，不在每格判定里。"><span>海拔高过大洲数</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="elevation < waterThreshold 写水体名，否则写陆地名；waterThreshold 来自界面滑块 Water level。"><span>海拔低过水位线</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="normalizeLatitude 是第 5 节温度公式的输入，陆海判定不涉及它。"><span>海拔低过纬度值</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="b"><fieldset><legend>2. 柏林噪声的连续性主要来自哪里？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="permutation 表只决定每个格子角用哪个梯度方向，它是离散的哈希来源，不是连续性的来源。"><span>固定写死的数表</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="fade 把小数位置压平（端点导数为 0），lerp 连续插值 8 个角；点连续移动输出就连续变化。"><span>平滑曲线的插值</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="nOctaves 决定细节层数（第 3 节），不影响单倍频 noise 的连续性。"><span>倍频叠加数多少</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="卷圆柱解决的是环绕地图左右接缝（第七课），普通地图不环绕也一样连续。"><span>圆柱卷绕的映射</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>3. 其他参数不变，只把 noise3d 的 scale 调大会怎样？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="细节层数由 nOctaves 决定；scale 不改变层数，只改变坐标被拉伸的程度。"><span>边缘细节显著变多</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="振幅衰减是 persistence 的职责；scale 不影响各层的振幅比例。"><span>高频振幅明显变弱</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="调大 scale 恰恰让单位距离跨过更少格子、变化更慢，特征更大更连贯。"><span>陆地碎成斑状小岛</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="scale 是除数：调大后同样距离对应噪声空间里更短的距离，特征变大——整块大陆或大洋。"><span>陆海连成整块的大</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. 一格的最终 temperature 主要由什么决定？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="公式是 (5×纬度折线 + 1×噪声)/6：期望温度占 5/6，噪声只让边界曲折。"><span>六分之五的纬度</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="噪声只占 1/6；纯噪声决定的是湿度，不是温度。"><span>六分之五的噪声</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="湿度是另一个独立字段，由单独的噪声场算出，不参与温度公式。"><span>这一格湿度多少</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="地形矩形是温度算完后用来选地形的，不反过来影响温度。"><span>规则集矩形位置</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：海拔低过水位线；2：平滑曲线的插值；3：陆海连成整块的大；4：六分之五的纬度。分别对应 <a href="#elevation">陆海判定</a>、<a href="#noise">噪声连续性</a>、<a href="#octaves">参数影响</a>、<a href="#climate">温度公式</a>。</p></details>
+<h3>练习 A · 推演参数变化（6 分钟）</h3><p>三张相同 seed、相同类型的图，分别只改一处：① Water level 从 0 拉到 +0.1；② Biome size 从 6 拉到 15；③ Temperature intensity 从 0.6 拉到 0.8。各自预测陆海或温湿分布的变化，并说出源码证据在哪一行。</p><details class="rubric"><summary>展开核对要点</summary><p>① waterThreshold 变大，更多格子满足 elevation &lt; waterThreshold（spawnLandOrWater，MapLandmassGenerator L99），水变多、大陆缩小。② tilesPerBiomeArea 是温湿噪声的 scale（applyHumidityAndTemperature L518、L560/566），调大后温湿场特征变大，气候带更成片（草原整块、荒漠整块），地形碎斑减少。③ intensity 进入幂指数 1−intensity（L568），调大后 |t|^(0.4) 比 |t|^(0.2)… 注意方向：intensity 变大 → 指数变小 → 中间值更被推向两端，热带和寒带都扩张、温带收窄。</p></details>
+<h3>练习 B · 读一组温湿矩形（6 分钟）</h3><p>打开 <code>android/assets/jsons/Civ V - Vanilla/Terrains.json</code>，找到 Grassland 和 Desert 的 “Occurs at temperature …” 规则。一格温度 0.85、湿度 0.1，会匹配到谁？一格温度 0.85、湿度 0.35 呢？如果两个都不匹配，代码走哪条路？</p><details class="rubric"><summary>展开核对要点</summary><p>温度 0.85、湿度 0.1：Desert 的 “between [0.1] and [0.8] … [0.2]” 等矩形不匹配（湿度不足），但 “between [-0.1] and [0.9] and humidity between [0] and [0.2]” 匹配 → Desert。温度 0.85、湿度 0.35：Grassland 的 “between [0.8] and [0.9] and humidity between [0.6]” 不匹配（湿度不足）；Desert 各矩形要么温度超界要么湿度超界——去查 Plains：“between [0.8] and [0.9] and humidity between [0.2] and [0.6]” 匹配 → Plains。若全不匹配，ifEmpty { terrains } 兜底整组随机（MapGenerator L594），保证每格有地形。</p></details>
+<h3>练习 C · 比较两种噪声的用途（5 分钟）</h3><p>Archipelago 用 ridged 噪声而 Perlin 类型用普通噪声。结合 ridgedNoise3d 取绝对值的差别，解释为什么群岛图选 ridged：它切完阈值后陆地的典型形态有什么不同？</p><details class="rubric"><summary>展开核对要点</summary><p>普通噪声的值围绕 0 缓慢起伏，阈值切出的陆地是团块状（有内部、有海岸线）。ridged 取 abs 后，原噪声接近 0 的等值带变成尖峰脊线——阈值切出的陆地变成窄条与碎片，正像群岛的岛屿链。另外 Archipelago 先把 waterThreshold += 0.25（L249），抬高水位线再切，碎片更小。</p></details>
+<h3>练习 D · 本地核验（可选，5～10 分钟）</h3><p>跑 <code>:tests:test --tests "com.unciv.logic.map.MapGenerationTests"</code>。terrainTileCountsReasonableForHexMaps 聚合 20 颗种子的 perlin 六边图后断言各地形数量（如 Ocean ≈ 4079、Grassland ≈ 2140）。对照本课内容想一想：这些数字钉住的分别是阶段链的哪几步？为什么测试注释说“即使用 seed 也不确定”、要靠 assertApproximately 的两倍容差？</p><details class="rubric"><summary>展开核对要点</summary><p>Ocean/Coast 钉住陆海（第 1 步）+ 湖岸（第 4 步）；Grassland/Plains/Desert/Tundra/Snow 钉住温湿选地形（第 2 步）；Hill 属第 3 步、Forest/Jungle 属第 5 步、Ice 属第 7 步，本课只需意识到计数跨阶段。不确定性的来源之一：选地形时匹配多个候选要 randomOrNull(RNG)（L594），RNG 序列还受前面各阶段抽种子次数影响——同样是“地形跟着 seed 走”，但统计上仍有波动，所以用宽容差防回归而不是精确断言。（本课程核对时 Gradle MCP 实测 4 过 0 失败。）</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/mapgenerator/MapLandmassGenerator.kt">MapLandmassGenerator.kt</a> 全文（重点：generateLand 的 when 分派、retryLoweringWaterLevel、两三个类型函数、getOceanEdgesTransform），再读 <a href="../../core/src/com/unciv/logic/map/mapgenerator/Perlin.kt">Perlin.kt</a> 全文（130 行，值得逐行读完），最后 <a href="../../core/src/com/unciv/logic/map/mapgenerator/MapGenerator.kt">MapGenerator.kt</a> 的 applyHumidityAndTemperature（L512 起）与 <a href="../../android/assets/jsons/Civ V - Vanilla/Terrains.json">Terrains.json</a> 的各地形 “Occurs at …” 规则。噪声速查见 <a href="reference/hexmath.html#noise">地图速查 · 噪声与分布</a>。</p><p>下次学习前，用两分钟默写：陆海判定的那行比较、温度公式的 5/6 与 1/6、scale 和 waterThreshold 各改什么；约一周后再做练习 A 和 B。如果记不清“intensity 为什么让气候更极端”，回第 5 节看幂曲线那一行，别硬背结论。</p><p>有不清楚的公式，可以直接问教学助手。把你预测错的那次调参和实际结果一起发来，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0007-map-generation.html">上一课：地图生成流水线</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="0009-elevation-rivers.html">下一课：山地与河流</a></div></section>
+<footer>资料核对：2026-09-14。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。</footer>
+</main></div>
+</body>
+</html>

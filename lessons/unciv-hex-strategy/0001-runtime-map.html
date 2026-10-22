@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>01 · 下一回合由谁推进 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>01 / 下一回合由谁推进</strong><a href="#goal">目标与场景</a><a href="#owners">1. 状态与职责</a><a href="#button">2. 按钮的实际动作</a><a href="#snapshot">3. 副本与线程</a><a href="#rotation">4. 文明轮转</a><a href="#settlement">5. 文明和城市的结算</a><a href="#screen">6. 显示结算后的局面</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 50～60 分钟<br>无需先跑通游戏<br>含源码走读与练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第一阶段 / 建立全局模型</div>
+<h1>下一回合由谁推进</h1>
+<p class="lead">点击“下一回合”后，游戏到底做了什么？这节课沿着源码往下读，看看界面如何发起结算，各个文明和城市又是按什么顺序处理的。</p>
+<p class="meta">需要的基础：Java 对象、集合、引用与线程，以及基础 Kotlin。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标与场景</h2>
+<p>做经营或探险游戏时，常会遇到这样的问题：玩家点了“进入下一天”，粮食要结算，人口可能增长，建筑可能完工，其他势力也该行动了。这些事由谁调用、先做哪件？我们借 Unciv 的“下一回合”看一套实际做法。以后再读地图和经济系统，就能知道它们在整个流程中负责哪一部分。</p>
+<div class="paired"><figure><img class="game-image" src="../../extraImages/GithubPreviewImage.jpg" width="1920" height="1080" alt="Unciv 仓库中的游戏截图：六边形地图、城市和单位，顶部有统计值，右上按钮显示 Pick construction。"><figcaption>图片来自项目仓库，界面可能与当前版本略有不同。注意右上角：按钮显示的是“Pick construction”（选择建造项目）。</figcaption></figure><div><h3>先认识三个游戏概念</h3><ul><li><strong>文明：</strong>本局中的一个玩家势力，可以由人控制，也可以由 AI 控制。</li><li><strong>城市：</strong>属于某个文明，管理自己的人口、建造项目和各项产出。</li><li><strong>回合：</strong>各文明轮流行动并结算；一个文明结束行动，不一定意味着整局的回合数加一。</li></ul><p>这节课先跟着人类玩家点击“下一回合”的常见情况读。读到每一步时，记得问自己：正在处理哪个文明的数据？是在开始回合，还是结束回合？具体经济公式、战斗细节和联机异常处理，后面再展开。</p><p class="source"><a href="reference/architecture.html#glossary">术语表</a><a href="../../docs/Developers/Project-structure-and-major-classes.md">项目官方结构说明</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>场景与职责</td><td>8 分钟</td><td>状态、规则、玩家视角和屏幕分别是什么</td></tr><tr><td>按钮与状态副本</td><td>10 分钟</td><td>点击按钮后从哪里开始结算</td></tr><tr><td>轮转与结算源码</td><td>15 分钟</td><td>文明和城市各自处理什么</td></tr><tr><td>界面更新与心智模型</td><td>7 分钟</td><td>结算后的局面怎样显示出来</td></tr><tr><td>闭卷检索与源码推演</td><td>12～18 分钟</td><td>两个人类玩家怎样轮流进行回合</td></tr></tbody></table>
+</section>
+
+<section id="owners"><h2>1. 先找状态，再找推进者</h2>
+<div class="paired"><div><pre><code><span class="comment">// GameInfo 中与本课相关的字段。</span>
+var civilizations = ArrayList&lt;Civilization&gt;()
+var tileMap: TileMap = TileMap()
+var gameParameters = GameParameters()
+var turns = 0
+var currentPlayer = ""
+
+<span class="comment">// 运行游戏时需要规则集，但保存时不把它写进存档。</span>
+@Transient
+lateinit var ruleset: Ruleset</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/GameInfo.kt">本地 GameInfo.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L101">固定版本 · L101、L179</a></p></div><div><p><code>GameInfo</code> 表示<strong>正在玩的这一局</strong>。<code>UncivGame</code> 则负责应用和屏幕层面的工作，两者不是同一个概念。</p><p><code>Ruleset</code> 回答“有什么单位、建筑和地形”；对局状态回答“谁拥有哪个单位、现在有多少人口”。规则对象与状态对象可以互相联系，但保存方式不同。</p><p><code>lateinit</code> 表示稍后初始化的非空属性；访问前必须赋值。<code>@Transient</code> 控制序列化，不负责初始化，也不意味着线程安全。</p></div></div>
+<pre><code><span class="comment">// 主要对象之间的引用关系，只列出本课会用到的部分。</span>
+GameInfo
+  civilizations → Civilization → cities → City
+                                      → population / cityConstructions
+  tileMap       → TileMap      → tileList → Tile
+  ruleset       → Ruleset（运行时引用）
+
+WorldScreen → GameInfo
+            → GameView（选定文明的观察视角）
+            → 地图、统计栏、按钮等 UI</code></pre>
+<p class="source">字段依据：<a href="../../core/src/com/unciv/logic/civilization/Civilization.kt">Civilization.kt · cities</a><a href="../../core/src/com/unciv/logic/city/City.kt">City.kt · L80</a><a href="../../core/src/com/unciv/logic/map/TileMap.kt">TileMap.kt · L39</a><a href="../../core/src/com/unciv/ui/screens/worldscreen/WorldScreen.kt">WorldScreen.kt · L90</a><a href="../../core/src/com/unciv/view/GameView.kt">GameView.kt</a></p>
+<table><thead><tr><th scope="col">职责</th><th scope="col">当前阅读入口</th><th scope="col">能回答的问题</th></tr></thead><tbody><tr><td>状态</td><td>GameInfo / Civilization / City / Tile</td><td>本局已经发生了什么？</td></tr><tr><td>规则</td><td>Ruleset 及其定义</td><td>在什么条件下允许或产生什么效果？</td></tr><tr><td>推进</td><td>GameInfo.nextTurn / TurnManager / CityTurnManager</td><td>谁先处理，谁后处理？</td></tr><tr><td>视角与显示</td><td>GameView / WorldScreen / 各 UI 组件</td><td>观察者可查询什么，画面如何呈现？</td></tr></tbody></table>
+<aside class="callout"><strong>Godot 对照：数据与节点</strong><p>如果用 Godot 来做，单位和建筑的规则定义可以放在自定义 <code>Resource</code> 中，界面则交给 <code>Control</code> 等节点。至于这局游戏里的单位、城市和地块数据，也可以用普通 C# 对象保存，不必每个都做成节点。这里还要留意资源共享：多个对象可能用着同一份 Resource，修改前先想清楚，改的是公共模板，还是某一个实例的数据。<a href="https://docs.godotengine.org/en/stable/tutorials/scripting/resources.html">Godot 官方说明</a>。</p></aside>
+<aside class="callout tradeoff"><strong>读源码时留意实际依赖</strong><p>上表方便我们找代码，但不代表各部分已经完全分离。例如，<code>GameInfo</code> 会访问 UI 进度和全局应用对象，<code>WorldScreen</code> 也直接持有对局状态。阅读时要看实际调用，不能先认定它一定是严格的 MVC。官方架构文档中还有 <code>CityInfo</code> 等旧类名，查找时以当前源码为准。</p></aside>
+</section>
+
+<section id="button"><h2>2. 点击这个按钮，不一定会进入下一回合</h2>
+<p>前面截图的右上按钮要求选择建造项目。这个按钮会根据当前局面做不同的事，所以我们要先看看，它现在会调用哪个方法。</p>
+<div class="paired"><div><pre><code><span class="comment">// NextTurnButton 中处理点击、选择动作的部分代码。</span>
+onActivation { nextTurnAction.action(worldScreen) }
+
+private fun getNextTurnAction(worldScreen: WorldScreen) =
+    NextTurnAction.entries.first { it.isChoice(worldScreen) }
+
+<span class="comment">// NextTurnAction 中的 NextTurn 分支。</span>
+override fun isChoice(worldScreen: WorldScreen) = true
+override fun action(worldScreen: WorldScreen) =
+    worldScreen.confirmedNextTurn()</code></pre><p class="source"><a href="../../core/src/com/unciv/ui/screens/worldscreen/status/NextTurnButton.kt">NextTurnButton.kt · L32、L83</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/status/NextTurnAction.kt#L134">NextTurnAction.kt · L134</a></p></div><div><p><code>entries.first { ... }</code> 按枚举声明的顺序，选择第一个满足条件的动作。前面的“选科技”“选生产”等条件都不满足时，才会轮到末尾总是返回 <code>true</code> 的 <code>NextTurn</code> 分支。</p><p><code>confirmedNextTurn</code> 会根据设置决定是否弹出确认框，确认后调用 <code>nextTurn()</code>。它是 <code>WorldScreen</code> 的扩展函数，代码却写在 <code>NextTurnAction</code> 中。读 Kotlin 时要留意：看起来像成员方法的调用，也可能是扩展函数。</p><p>另外，<code>NextTurnButton.update</code> 还会设置 <code>isEnabled</code>。如果正在自动存档，或者上一回合还没算完，按钮可能处于禁用状态。</p></div></div>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/status/NextTurnAction.kt#L197">确认分支原文 · L197</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/status/NextTurnButton.kt#L53">按钮启用条件 · L53</a></p>
+<aside class="callout"><strong>排查思路：先确认代码有没有执行到</strong><p>遇到“按按钮后没结算”，可以先查三件事：按钮是否可用？当前选中了什么动作？有没有调用 <code>WorldScreen.nextTurn</code>？确认已经进入结算，再去查经济公式。在 Godot 中排查类似问题时，也可以先检查信号是否连接、回调是否执行，以及哪个条件让流程提前结束。</p></aside>
+</section>
+
+<section id="snapshot"><h2>3. 复制一份游戏状态，在后台计算下一回合</h2>
+<p>进入 <code>WorldScreen.nextTurn</code> 后，游戏会复制当前状态，在后台线程中计算下一回合。下面只保留主要流程，省略了进度条初始化、联机上传和异常处理。</p>
+<div class="paired"><div><pre><code><span class="comment">// WorldScreen.nextTurn 的主要流程。</span>
+isPlayersTurn = false
+shouldUpdate = true
+
+nextTurnUpdateJob = Concurrency.runOnNonDaemonThreadPool("NextTurn") {
+    val originalGameInfo = gameInfo
+    val gameInfoClone = originalGameInfo.clone()
+    gameInfoClone.setTransients()
+
+    gameInfoClone.nextTurn(progressBar, true)
+
+    <span class="comment">// 如果玩家在等待时打开了另一局游戏，就结束这个后台任务。</span>
+    <span class="comment">// 避免下面的代码把界面切回原来那一局。</span>
+    if (game.gameInfo != originalGameInfo)
+        return@runOnNonDaemonThreadPool
+
+    startNewScreenJob(gameInfoClone, autoPlay)
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/ui/screens/worldscreen/WorldScreen.kt">本地 WorldScreen.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/WorldScreen.kt#L601">固定版本 · L601</a></p></div><div><h3>按执行顺序看这三步</h3><ol><li><strong>暂停改变局面的操作。</strong>玩家暂时不能继续下指令，但仍然可以浏览地图。</li><li><strong>在副本上结算。</strong>先复制状态，再补全对象引用等运行时数据，然后计算下一回合；原来的状态仍供界面显示。</li><li><strong>算完后再更新界面。</strong>先检查玩家有没有打开另一局游戏；如果已经换了，就结束任务，否则用算好的状态创建新界面。</li></ol><p>回头看第一节的对象关系，就容易理解了：按钮属于界面，实际改变的是 <code>GameInfo</code> 的副本，最后界面再显示这份新状态。</p><p>这里把结算放在后台，不等于 UI 也能随便放到后台。libGDX 的 OpenGL 操作必须在渲染线程执行，Scene2D 组件也不能随意从多个线程访问。</p></div></div>
+<p class="source"><a href="https://libgdx.com/wiki/app/threading">libGDX 官方线程约定</a><a href="../../docs/Developers/Project-structure-and-major-classes.md">项目文档 · NextTurn 的克隆动机</a></p>
+<details id="ui-progress"><summary>深入一点：结算代码同步执行，UI 为什么还能更新？（选读，约 8 分钟）</summary>
+<p><strong>同步执行只说明调用顺序，不说明运行在哪个线程。</strong><code>GameInfo.nextTurn</code> 中的 startTurn、automateTurn、endTurn 确实依次执行，但这段工作在后台线程上进行，渲染线程没有停下来等它算完。</p>
+<h3>协程藏在外面的工具方法中</h3>
+<p>继续跟进 <code>Concurrency.runOnNonDaemonThreadPool</code>，可以看到它调用 <code>run</code>，再经过 <code>launchCrashHandling</code> 调用协程的 <code>launch</code>。调度器 <code>Dispatcher.NON_DAEMON</code> 则来自 Java 线程池：</p>
+<pre><code><span class="comment">// Concurrency.kt 中创建线程池调度器的部分代码。</span>
+val executor = Executors.newCachedThreadPool(object : ThreadFactory {
+    <span class="comment">// ...省略线程命名及守护线程设置...</span>
+})
+return CrashHandlingDispatcher(executor.asCoroutineDispatcher())</code></pre>
+<p>协程负责把外层任务安排到这个线程池；其中调用的普通函数仍然可以是同步函数。就像 Java 中把一段按顺序执行的代码交给 ExecutorService：这段代码没有变成多段并行任务，但提交任务的 UI 线程可以继续处理自己的工作。</p>
+<p>所以不用给 startTurn、automateTurn、endTurn 各套一个协程。反过来，只给函数加上 <code>suspend</code> 也不会自动让它去后台运行；这里真正决定线程的是调度器。</p>
+<p class="source"><a href="../../core/src/com/unciv/utils/Concurrency.kt">本地 Concurrency.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/utils/Concurrency.kt#L74">任务入口 · L74</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/utils/Concurrency.kt#L99">launch · L99</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/utils/Concurrency.kt#L189">线程池 · L189</a></p>
+<h3>结算时通知进度，界面有空时更新</h3>
+<p><code>WorldScreen.nextTurn</code> 在启动后台任务前创建 <code>NextTurnProgress</code>，并调用它的 <code>start(this)</code>。这个进度条对象随后作为参数传给 <code>GameInfo.nextTurn</code>，再传到 <code>TurnManager</code>。例如，在处理城市时：</p>
+<pre><code><span class="comment">// TurnManager.startTurn 中的城市循环。</span>
+for (city in civInfo.cities) {
+    progressBar?.increment()
+    CityTurnManager(city).startTurn()
+}</code></pre>
+<p>这里调用 increment 后直接处理城市，不会等进度条画出来。再看进度条类中的实现：</p>
+<pre><code><span class="comment">// NextTurnProgress 中的部分代码。</span>
+fun increment() {
+    progress++
+    startUpdateProgress()
+}
+
+private fun startUpdateProgress() {
+    isDirty = true
+    Concurrency.runOnGLThread {
+        updateProgress()  <span class="comment">// 在渲染线程中修改进度条。</span>
+    }
+}</code></pre>
+<p><code>runOnGLThread</code> 使用另一个调度器 <code>Dispatcher.GL</code>。它最终通过 <code>Gdx.app.postRunnable(block)</code> 把任务交给渲染线程。根据 libGDX 的约定，这类任务在后续一帧的 render 调用前执行；屏幕的 render 再通过 <code>stage.act()</code> 和 <code>stage.draw()</code> 更新、绘制 UI。</p>
+<pre><code>后台线程：城市 A → increment → 城市 B → increment → 继续结算
+                         │                  │
+                         └─ 请求更新进度 ────┘
+                                  ↓
+渲染线程：处理输入 → 执行排队的 UI 更新 → 更新动画、绘制画面 → 下一帧
+
+后台不用等待这一帧画完，渲染线程也不用等待整轮结算完成。</code></pre>
+<p>当前这条流程显示的是 <code>Working...</code> 状态和进度条，并没有在每个 AI 回合开始时传入文明名称。进度主要按城市的开始、结束处理次数估算，也不等于“已经用掉的时间百分比”。</p>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L69">城市循环 · L69</a><a href="../../core/src/com/unciv/ui/screens/worldscreen/status/NextTurnProgress.kt">NextTurnProgress.kt · start / increment / updateProgress</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/utils/Concurrency.kt#L218">postRunnable · L218</a><a href="../../core/src/com/unciv/ui/screens/basescreen/BaseScreen.kt">BaseScreen.render · L87</a><a href="../../core/src/com/unciv/ui/screens/worldscreen/status/NextTurnAction.kt">Working 状态 · L40</a></p>
+<h3>如果要等动画播完，又是另一种需求</h3>
+<p>“正在处理某文明”是一条进度通知：后台可以发完就继续算。但“角色走到目的地后，才开始下一次攻击”要求先后配合，不能只通知一下就继续执行。</p>
+<p>一般有两种做法：让执行流程等待动画完成的信号，再处理下一步；或者先算出结果和动作记录，再由表现层按顺序播放。它们是可选设计，不是上面这条 Unciv 进度条流程的实现。</p>
+<p>还有一个容易忽略的细节：把“正在处理 A”交给 UI 后，后台可能很快就算完 A，又开始 B。通知已经发出，并不保证玩家一定看到 A 的文字。如果要求每条提示都展示出来，或要求动画完整播放，就要另外控制显示顺序和时长。</p>
+<aside class="callout"><strong>Godot 对照：后台计算，主线程改节点</strong><p>在 Godot 4 C# 中也要分清这两件事：后台任务可以计算自己负责的数据，修改活动场景树中的 Label、进度条等节点则要交回主线程。可以通过 <code>CallDeferred</code> 安排节点更新；它同样不表示“调用返回时画面已经显示”。参见 <a href="https://docs.godotengine.org/en/stable/tutorials/performance/thread_safe_apis.html#scene-tree">Godot 官方线程说明</a>。</p></aside>
+</details>
+<details id="turn-presentation"><summary>设计延伸：播完当前玩家的动画，再进入下一个玩家的回合（选读，约 10 分钟）</summary>
+<p>前面已经看到，<code>progressBar.increment()</code> 只请求 UI 更新，结算不等它完成。如果游戏要求“播完 A 的回合，再计算 B 的回合”，就需要在两个玩家之间加入等待。</p>
+<p><strong>问题不在 while，而在循环中没有等待表现完成的步骤。</strong>Unciv 当前的 <code>GameInfo.nextTurn</code> 把多个 AI 的回合连续算完，调用者要等整个方法返回后才能接着做事。在外面等待这个方法结束，无法把等待点插到它内部的两个 AI 之间。</p>
+<h3>把一次计算缩小到一个玩家</h3>
+<p>针对“每个玩家播完再继续”的需求，可以把回合循环放到一个负责流程的对象中，例如 TurnController。它调用规则层算出当前玩家的结果，调用表现层播放，再切换玩家。规则层不需要知道 Tween、节点或动画时长。</p>
+<pre><code><span class="comment">// C# 设计示意：下面这些游戏方法是示例，不是 Unciv 的现有 API。</span>
+<span class="comment">// 假定从 Godot 主线程调用，且已经轮到第一个 AI。</span>
+async Task RunAiTurnsAsync()
+{
+    while (game.CurrentPlayer.IsAi)
+    {
+        <span class="comment">// 只计算当前 AI：startTurn → automateTurn → endTurn。</span>
+        <span class="comment">// 返回这次发生的动作和数值变化，暂时不切换玩家。</span>
+        TurnResult result = game.ExecuteCurrentTurn();
+
+        <span class="comment">// 这次播放的动画全部结束后，才继续执行下面的代码。</span>
+        await presenter.PlayTurnAsync(result);
+
+        game.MoveToNextPlayer();
+    }
+}</code></pre>
+<p><code>game</code> 管理状态并计算规则；<code>presenter</code> 操作节点、播放动画；外面的 <code>RunAiTurnsAsync</code> 决定执行顺序。等待发生在这个外层流程中，不需要让伤害计算、人口增长等规则方法都改成异步。</p>
+<p>为了突出等待的位置，示例假定单次计算足够短，直接在主线程执行。若 AI 计算很重，可以把纯数据计算交给后台任务并等待结果，再回主线程播放。前提是后台拥有独立的数据访问权，不能把会访问 Godot 节点的代码直接塞进 <code>Task.Run</code>；<code>async</code> 本身也不会让计算自动去后台。</p>
+<h3>循环停下来，主线程不会停下来</h3>
+<p>执行到 <code>await</code> 时，如果播放还没完成，当前异步方法会暂时返回，把执行机会交还给引擎。Godot 继续处理每一帧、推进 Tween、绘制画面。等播放任务完成，这个方法才从 await 后面继续，执行 <code>MoveToNextPlayer</code>。</p>
+<pre><code>计算 A 的回合
+    ↓
+开始播放 A 的动画
+    ↓
+await：回合流程暂时不往下走；Godot 继续逐帧更新
+    ↓
+A 的动画全部结束，播放任务完成
+    ↓
+切换到 B，再计算 B 的回合</code></pre>
+<p>不要在主线程用 <code>Task.Wait()</code>、<code>.Result</code> 或 <code>Thread.Sleep</code> 来代替这个等待。动画依赖主线程逐帧推进，把线程堵住后，动画也无法正常结束。C# 的 <a href="https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/operators/await">await 官方说明</a>明确区分了“暂时停止异步方法”和“阻塞线程”。</p>
+<h3>PlayTurnAsync 到底什么时候算完成？</h3>
+<p>这个方法返回的 Task 必须代表<strong>本次表现已经完成</strong>，而不是“已经提交 UI 任务”或“已经创建 Tween”。例如，下面这个方法属于表现层中的 Node 脚本，在主线程执行：</p>
+<pre><code><span class="comment">// Godot 4 C#：正常播放一段有限时长的移动动画。</span>
+<span class="comment">// 假定播放期间节点有效，Tween 不被中断。</span>
+async Task PlayMoveAsync(Node2D view, Vector2 destination)
+{
+    var tween = view.CreateTween();
+    tween.TweenProperty(view, "position", destination, 0.3);
+
+    <span class="comment">// 创建 Tween 不代表播放结束，Finished 才表示它正常播完。</span>
+    await ToSignal(tween, Tween.SignalName.Finished);
+}</code></pre>
+<p>整回合有多个动作时，<code>PlayTurnAsync</code> 可以依次等待每个动作的播放任务；允许同时播的动画，则要等这一组都完成后再返回。如果没有需要显示的动作，播放任务可以直接完成。</p>
+<p>同样地，即使用 <code>join</code> 等到了某个 GL 调度任务结束，如果那个任务只调用了“开始动画”，也仍然没有等到动画结束。在 Kotlin 中，可以让外层回合方法成为 <code>suspend</code> 函数，并调用真正等待动画完成的挂起函数；原来的同步 <code>nextTurn</code> 内部不能凭空多出这种等待。</p>
+<p class="source"><a href="https://docs.godotengine.org/en/stable/classes/class_tween.html#class-tween-signal-finished">Godot Tween.finished</a><a href="https://docs.godotengine.org/en/stable/tutorials/scripting/c_sharp/c_sharp_signals.html">Godot C# ToSignal</a><a href="../../core/src/com/unciv/utils/Concurrency.kt">Unciv 调度方法与 withGLContext</a></p>
+<h3>结果已经算完，动画怎样保留过程？</h3>
+<p>假设 A 的单位先从格子 1 走到格子 2，再攻击 B。整回合算完时，逻辑位置已经是格子 2，B 的血量也已经扣了。若界面每帧都直接读取最终位置和血量，就会先瞬移、先掉血，再补播动画。</p>
+<p>因此，<code>TurnResult</code> 要保留播放所需的过程数据，例如单位 ID、起点、终点、攻击目标、扣血前后的数值。表现层按这些记录推进画面，播完后再与这一回合的最终状态对齐。这些记录应保存当时的值，不能只是引用后面还会变化的单位对象。显示动画时也不要再算一次伤害或再执行一次移动规则。</p>
+<h3>需要在哪一步停，就把计算拆到哪一步</h3>
+<table><thead><tr><th scope="col">需求</th><th scope="col">安排方式</th></tr></thead><tbody><tr><td>A 的回合播完，才计算 B</td><td>计算一个玩家 → 等待整回合表现 → 切换玩家</td></tr><tr><td>每走一步都要等动画，可能还要玩家选择</td><td>计算一个动作 → 等待表现或输入 → 决定下一个动作</td></tr><tr><td>只要求画面依次播放，逻辑可以提前算完</td><td>先计算并记录多个回合，再按顺序播放记录</td></tr></tbody></table>
+<p>第三种也能让玩家看到“A 播完再播 B”，但不满足“B 的逻辑也必须等 A 播完才开始”。如果中途的玩家输入可能改变后面的结果，就不能事先把那些结果都算死。</p>
+<p>不使用 async/await 时，也可以显式保存“计算中、播放中、等待输入”等状态，收到播放完成的回调后再切换状态。两种写法都要保存当前玩家和执行进度；简单的顺序流程用 async/await 更容易看清先后关系。</p>
+<aside class="callout"><strong>落地时补上跳过和退出处理</strong><p>跳过动画时，表现层应直接显示本次结果并完成播放任务；退出对局时，则应取消整个流程，不能恢复后又开始下一位玩家。不要假定 Tween 被 Kill 或节点被释放后，正常完成信号仍会到来。还要防止按钮连点启动两套回合循环。上面的短例子只展示正常完成的过程。</p></aside>
+</details>
+<h3>为什么 clone 之后还要 setTransients？</h3>
+<div class="paired"><pre><code><span class="comment">// GameInfo.clone 的部分代码。</span>
+val toReturn = GameInfo()
+toReturn.tileMap = tileMap.clone()
+toReturn.civilizations = civilizations.asSequence()
+    .map { it.clone() }
+    .toCollection(ArrayList(civilizations.size))
+<span class="comment">// ...省略其他字段的复制...</span>
+toReturn.gameParameters = gameParameters
+
+<span class="comment">// 再看 GameInfo.setTransients 中的两处赋值。</span>
+tileMap.gameInfo = this
+<span class="comment">// ...省略旧存档和模组名称的兼容处理...</span>
+ruleset = RulesetCache.getComplexRuleset(gameParameters)</code></pre><div><p>新复制出的 <code>GameInfo</code> 还不能直接拿来运行。例如，地图需要知道自己属于哪个 <code>GameInfo</code>，对局也需要找到要使用的规则集。上面两处赋值就在补上这些引用。<code>setTransients</code> 还会重算缓存数据，并处理旧存档的兼容问题。</p><p><strong>clone 不保证所有字段都被深拷贝。</strong>地图和文明分别调用了自己的 <code>clone()</code>，但 <code>gameParameters</code> 只是把引用赋给副本，两个字段仍然指向同一个对象。想判断某个对象能否独立修改，需要继续检查它的复制方式和使用位置。</p><p>先记住这里的顺序：<strong>复制状态 → 补全运行时数据 → 计算下一回合</strong>。第二课会接着讲对象之间的关系，第 25 课再详细讲读档和兼容处理。</p></div></div>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L198">clone · L198</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L710">setTransients · L710</a><a href="../../docs/Developers/Saved-games-and-transients.md">官方 transients 说明</a></p>
+<aside class="callout tradeoff"><strong>设计取舍：什么时候值得复制状态？</strong><p>Unciv 在这条下一回合流程中复制整局，是为了让后台结算和前台显示分别使用各自的状态。这不代表每次点击或移动都要复制，更不代表 Godot 即时经营游戏应该每帧复制整个世界。做自己的游戏时，先明确哪些数据会在后台修改、界面什么时候读取结果，再根据数据量决定复制哪些内容、多久复制一次。</p></aside>
+</section>
+
+<section id="rotation"><h2>4. 轮到哪个文明，就处理哪个文明的回合</h2>
+<p>接下来进入 <code>GameInfo.nextTurn</code>，重点变成了“下一个轮到谁”。为了看清主流程，下面<strong>简化了原方法</strong>：假定所有玩家都还在场，暂时不考虑模拟、战败、观战和联机的特殊情况。</p>
+<div class="paired"><pre><code><span class="comment">// GameInfo.nextTurn 的简化版本，仅用于理解文明的处理顺序。</span>
+var player = currentPlayerCiv
+var playerIndex = civilizations.indexOf(player)
+
+fun setNextPlayer() {
+    playerIndex = (playerIndex + 1) % civilizations.size
+    if (playerIndex == 0) turns++
+    player = civilizations[playerIndex]
+}
+
+if (player.isHuman()) {
+    TurnManager(player).endTurn(progressBar)
+    setNextPlayer()
+}
+
+while (player.isAI()) {
+    TurnManager(player).startTurn(progressBar)
+    TurnManager(player).automateTurn()
+    TurnManager(player).endTurn(progressBar)
+    setNextPlayer()
+}
+
+currentPlayer = player.civID
+currentPlayerCiv = player
+TurnManager(player).startTurn(progressBar)</code></pre><div><h3>遇到人类玩家时停下来</h3><p>先结束当前人类玩家的回合，再逐个处理后面的 AI。轮到下一位人类玩家时，调用他的 <code>startTurn</code> 做好准备，然后把操作机会交给他。</p><p>注意 <code>GameInfo.turns</code>：只有文明列表的索引<strong>回到 0</strong> 时，它才加一。所以调用一次 <code>nextTurn</code>，整局的回合数不一定增加；后面两个相邻的人类玩家就是一个例子。</p><p>原方法的 <code>while</code> 条件还包含模拟、战败玩家和观战等情况。分析这些场景时，需要回到原方法看完整条件。</p><p><code>TurnManager(player)</code> 创建的是一个管理器，传入的是已有的文明对象。接下来的方法都在处理这个文明，没有重新创建一个文明。</p></div></div>
+<p class="source"><a href="../../core/src/com/unciv/logic/GameInfo.kt">本地 GameInfo.nextTurn</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L395">索引递增 · L395</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L435">完整自动推进条件 · L435</a></p>
+<aside class="callout"><strong>回头看第一节的对象关系</strong><p><code>GameInfo</code> 持有文明列表，所以它能决定下一个轮到谁，再把该文明交给 <code>TurnManager</code> 处理。地图生成则属于新建地图的流程；这里的 <code>nextTurn</code> 使用已有地图，不会重新生成地形。</p></aside>
+</section>
+
+<section id="settlement"><h2>5. 文明先处理收支，再逐个处理城市</h2>
+<p>沿 <code>TurnManager.endTurn</code> 继续读，会看到“计算本回合收支”和“修改国库余额”是分开的。下面只列出相关调用，保留它们在原方法中的先后顺序，具体公式留到经济专题再讲。</p>
+<div class="paired"><pre><code><span class="comment">// TurnManager.endTurn 的部分代码。</span>
+<span class="comment">// 先更新文明的各项产出汇总。</span>
+civInfo.updateStatsForNextTurn()
+<span class="comment">// ...省略获取 nextTurnStats 和处理破产的代码...</span>
+<span class="comment">// 将本回合的黄金净变化计入国库。</span>
+civInfo.addGold(nextTurnStats.gold.toInt())
+
+<span class="comment">// ...科技、宗教、间谍等处理...</span>
+for (city in civInfo.cities.sortedByDescending { it.isBeingRazed }) {
+    progressBar?.increment()
+    CityTurnManager(city).endTurn()
+}
+<span class="comment">// ...临时效果、黄金时代、单位和外交等后续处理...</span></code></pre><div><h3>算出收支，不等于已经入账</h3><p><code>updateStatsForNextTurn</code> 更新计算结果；<code>addGold</code> 才会修改国库中的黄金数量。比如本回合黄金净收益为 10，先算出这个 10，之后再把它加到余额上。若净收益为负，入账时余额就会减少。</p><p>看调用顺序：<code>addGold</code> 在城市 <code>endTurn</code> 循环之前。分析某项变化会不会影响这次入账时，必须按源码中的顺序推演，不能先假定“所有城市算完，再统一加钱”。</p><p><code>sortedByDescending</code> 把正在夷平的城市排到前面，源码注释说明这是为了解决地块归属问题。排序还会生成一份新列表，这样即使结算时有城市被移除，也不会一边遍历原列表一边修改它。</p></div></div>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L275">汇总与入账 · L275、L316</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/managers/TurnManager.kt#L329">城市循环及原注释 · L329</a><a href="../../core/src/com/unciv/logic/civilization/Civilization.kt">Civilization.updateStatsForNextTurn · L479</a></p>
+<h3>城市又把工作交给自己的管理器</h3>
+<div class="paired"><pre><code><span class="comment">// CityTurnManager.endTurn 的部分代码。</span>
+val stats = city.cityStats.currentCityStats
+city.cityConstructions.endTurn(stats)
+city.expansion.nextTurn(stats.culture)
+<span class="comment">// ...省略夷平城市的处理...</span>
+<span class="comment">// 城市不在夷平过程中时，更新人口。</span>
+city.population.nextTurn(city.foodForNextTurn())
+<span class="comment">// ...省略宗教处理、城市回血和人口分配调整...</span>
+city.clearCaches()
+
+<span class="comment">// 下面这句在 CityTurnManager.startTurn 中，回合开始时才执行。</span>
+city.cityConstructions.constructIfEnough()</code></pre><div><p><code>currentCityStats</code> 缓存着城市当前的各项产出。调用 <code>CityStats.update</code> 时，会重新计算并替换这份结果。它记录的是产出，不是城市已经存了多少粮食，也不是文明的国库余额。</p><p>城市的建造、扩张和人口各有自己的处理方法。<code>CityTurnManager</code> 按顺序调用这些方法，把一座城市的回合处理串起来。</p><p><strong>有个时机值得留意：</strong>城市在 <code>endTurn</code> 中累积生产力，到 <code>startTurn</code> 才检查能否完成建造。源码注释解释了原因：如果新单位在回合结束时出现，敌人就可能先行动，玩家还没来得及控制它，它就遭到攻击了。</p></div></div>
+<p class="source"><a href="../../core/src/com/unciv/logic/city/managers/CityTurnManager.kt">CityTurnManager.kt · L160</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/managers/CityTurnManager.kt#L34">完成建造的时机 · L34</a><a href="../../core/src/com/unciv/logic/city/CityConstructions.kt">CityConstructions.endTurn · L351</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/city/CityStats.kt#L485">CityStats.update · L485</a></p>
+<aside class="callout"><strong>Godot 对照：“每天结算一次”还不够具体</strong><p>假设做一款门派经营游戏：新弟子先加入再分配工作，他今天可能就有产出；若粮食结算后才加入，结果就不同。这是我们自己的设计例子，但和上面的单位生成有相同的问题：事情发生的顺序会影响玩法。用 Godot 实现时，应明确规定这些步骤的顺序，而不是让它取决于几个节点的定时回调恰好谁先执行。</p></aside>
+<p>后续衔接：第 13 课解释 <code>CityStats</code> 的数据来源，第 14～15 课处理人口和建造，第 16 课再回到这里的文明汇总与黄金入账。</p>
+</section>
+
+<section id="screen"><h2>6. 用结算后的状态更新游戏界面</h2>
+<div class="paired"><pre><code><span class="comment">// startNewScreenJob 的部分代码。</span>
+val newWorldScreen = UncivGame.Current.loadGame(gameInfo, autoPlay)
+<span class="comment">// ...异常处理...</span>
+val shouldAutoSave = !autosaveDisabled
+    &amp;&amp; gameInfo.turns % UncivGame.Current.settings.turnsBetweenAutosaves == 0
+if (shouldAutoSave) {
+    newWorldScreen.autoSave()
+}
+
+<span class="comment">// UncivGame.loadGame 中的部分代码，在渲染线程执行。</span>
+val newWorldScreen = WorldScreen(
+    newGameInfo, autoPlay, newGameInfo.getPlayerToViewAs(),
+    worldScreenRestoreState
+)
+<span class="comment">// ...选定实际展示的屏幕...</span>
+setScreen(screenToShow)</code></pre><div><p>这里的 <code>loadGame</code> 接收已经算好的 <code>GameInfo</code>，用它重新创建游戏界面，并不需要再从磁盘读一遍存档。</p><p><code>UncivGame.loadGame</code> 在 <code>withGLContext</code> 代码块中创建新 <code>WorldScreen</code>，让这部分图形操作在渲染线程执行。满足条件时，还会恢复原来的地图缩放和滚动位置。如果是多个人类玩家在同一台设备上轮流玩，则会先显示玩家准备界面。</p><p>最后，游戏根据回合间隔决定是否自动存档。还记得第二节的按钮启用条件吗？这里的 <code>waitingForAutosave</code> 就是其中之一：自动存档没结束时，不能再次推进回合。</p></div></div>
+<p class="source"><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/WorldScreen.kt#L839">autoSave / startNewScreenJob · L839</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/UncivGame.kt#L199">UncivGame.loadGame · L199</a></p>
+<ol class="flow" aria-label="下一回合的四个步骤"><li><strong>处理点击</strong><span>选择按钮动作，必要时弹出确认框。</span></li><li><strong>准备副本</strong><span>复制状态，补全运行时数据。</span></li><li><strong>计算下一回合</strong><span>按文明顺序处理 AI 行动和各项结算。</span></li><li><strong>更新界面</strong><span>显示新局面，按设置自动存档。</span></li></ol>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>GameInfo 管这一局的数据，UncivGame 管应用和界面。</strong></li><li><strong>同一个按钮可能执行不同动作，点击它不一定会进入下一回合。</strong></li><li><strong>下一回合先复制状态、补全运行时数据，再在后台计算，最后更新界面。</strong></li><li><strong>GameInfo 决定轮到谁，TurnManager 处理该文明的回合，CityTurnManager 处理其中每座城市。</strong></li><li><strong>算出产出和实际入账是两步，调用顺序会影响游戏结果。</strong></li><li><strong>文明列表的索引回到首位时，GameInfo.turns 才加一。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；能自己画出调用链、推演玩家顺序，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. GameInfo 主要记录什么？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="界面由 WorldScreen 等对象负责。再看看 GameInfo 中的 civilizations、tileMap 和 turns。"><span>全部界面节点</span></label><label class="option"><input type="radio" name="q1" value="b" data-feedback="它记录这局游戏中的文明、地图、回合数等数据；管理应用和界面的是 UncivGame。"><span>当前对局状态</span></label><label class="option"><input type="radio" name="q1" value="c" data-feedback="规则定义来自 Ruleset；GameInfo 引用它，同时还记录这局游戏的实际状态。"><span>全局规则模板</span></label><label class="option"><input type="radio" name="q1" value="d" data-feedback="GameInfo 中还记录着城市、单位和回合数，显然不只是程序启动时的配置。"><span>程序启动配置</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>2. clone 之后，计算下一回合前还要做什么？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="下一回合还没算完。先看看 clone 和 nextTurn 之间调用了什么。"><span>立即刷新界面</span></label><label class="option"><input type="radio" name="q2" value="b" data-feedback="副本还缺少一些运行时引用，例如地图对 GameInfo 的引用，需要先补上。"><span>直接开始结算</span></label><label class="option"><input type="radio" name="q2" value="c" data-feedback="setTransients 会补全引用、重算缓存等运行时数据，然后才能在副本上结算。"><span>补全对象引用</span></label><label class="option"><input type="radio" name="q2" value="d" data-feedback="这里继续使用本局已有的地图；进入下一回合不会重新生成地形。"><span>重新生成地图</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>3. 要确认每回合黄金何时入账，先做什么？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="沿 TurnManager.endTurn 查 updateStatsForNextTurn 和 addGold 的调用。"><span>追踪文明结算</span></label><label class="option"><input type="radio" name="q3" value="b" data-feedback="界面布局决定数值显示在哪里，国库何时增减要去结算代码中找。"><span>追踪界面布局</span></label><label class="option"><input type="radio" name="q3" value="c" data-feedback="地形会影响产出，但黄金何时计入国库由文明的结算代码决定。"><span>追踪地形生成</span></label><label class="option"><input type="radio" name="q3" value="d" data-feedback="纹理加载负责图片资源，不会修改国库中的黄金数量。"><span>追踪纹理加载</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>4. GameInfo.turns 在什么条件下增加？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="按钮可能是在选科技；即使确实推进了回合，从一位人类玩家换到下一位时，turns 也不一定增加。"><span>每次按钮点击</span></label><label class="option"><input type="radio" name="q4" value="b" data-feedback="不是每结算一座城市就加一。找找 setNextPlayer 中的 turns++。"><span>每个城市结算</span></label><label class="option"><input type="radio" name="q4" value="c" data-feedback="画面可以一直刷新，游戏仍停留在当前回合；两者是不同的流程。"><span>每个画面刷新</span></label><label class="option"><input type="radio" name="q4" value="d" data-feedback="setNextPlayer 中，文明索引回到 0 时才执行 turns++。"><span>轮转回到首位</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：当前对局状态；2：补全对象引用；3：追踪文明结算；4：轮转回到首位。分别对应 <a href="#owners">状态职责</a>、<a href="#snapshot">副本准备</a>、<a href="#settlement">文明结算</a>、<a href="#rotation">轮转逻辑</a>。</p></details>
+<h3>练习 A · 画出完整调用链（4 分钟）</h3><p>不看正文，用方法名串起“按钮 → 副本 → 文明/城市 → 新屏幕”。在链上标出线程切换和三个最容易混淆的对象。</p><details class="rubric"><summary>展开核对要点</summary><pre><code>NextTurnButton → NextTurnAction.NextTurn
+  → confirmedNextTurn → WorldScreen.nextTurn
+  → 后台：clone → setTransients → GameInfo.nextTurn
+      → TurnManager.endTurn/startTurn
+          → CityTurnManager.endTurn/startTurn
+  → startNewScreenJob → UncivGame.loadGame
+      → GL 上下文：创建 WorldScreen 并切换屏幕</code></pre><p>至少解释 GameInfo（对局）、UncivGame（应用）、WorldScreen（屏幕）的区别；指出 AI automateTurn 在文明轮转内部，而不是城市结算内部。漏一段就回到对应源码核对后重画。</p></details>
+<h3>练习 B · 两个人类玩家，一位 AI（5～8 分钟）</h3><p>假设这局只有三个文明，列表顺序为 <code>[A(人类), B(人类), C(AI)]</code>。他们都没有被击败，也没有开启观战、模拟或自动游玩。当前轮到 A，<code>currentPlayer = A</code>、<code>turns = 40</code>。A 结束自己的回合后，B 也结束自己的回合。</p><ol><li>A 结束回合后，轮到谁操作？turns 是多少？调用了谁的 startTurn、endTurn？</li><li>B 结束回合后，轮到谁操作？turns 是多少？期间 C 执行了哪些步骤？</li><li>为什么不能用“点击了几次下一回合”来计算整局经过了多少回合？</li></ol><details class="rubric"><summary>展开答案与分析</summary><p><strong>第一次：</strong>A.endTurn → 索引到 B → B.startTurn；轮到 B 操作，turns 仍为 40。</p><p><strong>第二次：</strong>B.endTurn → C.startTurn → C.automateTurn → C.endTurn → 索引回 0、turns 变 41 → A.startTurn；轮到 A 操作。</p><p>核对三件事：两次分别轮到谁、turns 的值、哪些文明执行了 startTurn 和 endTurn。能解释清楚，才算分清了“某个文明的回合”和“整局回合数”。原方法的 L395、L411、L435、L471 可以用来核对；这里假设列表中只有这三个文明。</p></details>
+<h3>练习 C · 为什么断点没有命中？（3～6 分钟）</h3><p>界面按钮显示“Pick a tech”，点击后科技选择界面正常打开，但 <code>GameInfo.nextTurn</code> 的断点没有命中。用两个源码位置解释这是否正常，再给出下一步检查点。</p><details class="rubric"><summary>展开核对要点</summary><p>这是预期路径：NextTurnButton 选择第一个 isChoice 为真的动作；NextTurnAction.PickTech 打开科技选择界面，而不是调用 WorldScreen.nextTurn。完成必要选择后再查看实际动作与按钮启用条件，随后检查 WorldScreen.nextTurn 是否到达。不要仅凭未命中结算断点就判断结算方法坏了。</p></details>
+<h3>选读练习 · 同步代码一定会卡住画面吗？</h3><p>假设某个 AI 的 automateTurn 连续计算了两秒，中间没有挂起：画面一定会停止刷新吗？如果改成在渲染线程直接调用它，又会怎样？</p><details class="rubric"><summary>展开答案</summary><p>在当前流程中，它运行在后台线程，渲染线程可以继续刷新，所以画面不必停止；只是这两秒里没有新的进度通知时，进度条可能暂时不动。若改为在渲染线程直接计算两秒，就会占住该线程，期间它无法正常处理后续 UI 更新和绘制。判断关键是运行线程，而不是函数有没有 suspend。</p><p>进一步想想：如果先给 UI 发一条“正在处理 A”，马上继续计算 B，能保证 A 的文字至少显示一帧吗？不能，安排更新和完成绘制之间还有时间差。</p></details>
+<h3>选读练习 · await 的对象真的代表动画结束吗？</h3><p><code>PlayTurnAsync</code> 创建一段 Tween 后，立即返回 <code>Task.CompletedTask</code>。外层已经写了 <code>await presenter.PlayTurnAsync(result)</code>，能保证播完后才轮到下一位玩家吗？</p><details class="rubric"><summary>展开答案</summary><p>不能。外层等到的是一个已经完成的 Task，会立即继续执行。表现层必须让返回的 Task 对应这次动画的完成，例如正常播放时等待 Tween.Finished，再返回。要检查的是“这个 Task 在什么时刻完成”，而不只是代码有没有写 await。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/WorldScreen.kt#L601">WorldScreen.nextTurn</a>。先找到 clone、setTransients、nextTurn，再看它如何检查玩家是否切换了对局，以及何时调用 startNewScreenJob。然后进入 <a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/GameInfo.kt#L382">GameInfo.nextTurn</a>，核对文明的处理顺序。</p><p>下次学习前，用两分钟重画练习 A；约一周后再做一次练习 B。如果只记得类名，说不出谁调用谁，可以翻一下<a href="reference/architecture.html#turn">调用链速查</a>，弄清卡住的地方后，再合上资料试一次。</p><p>有不清楚的步骤，可以直接问教学助手。说说你读到了哪个方法、现在怎么理解、哪里想不通，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="reference/architecture.html">架构与术语速查</a><a href="0002-data-ownership.html">下一课：一局游戏的数据归谁</a></div></section>
+<footer>资料核对：2026-09-09。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。完整代码见对应的源码链接。</footer>
+</main></div>
+</body>
+</html>

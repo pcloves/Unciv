@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>12 · 地图怎样被看见 | Unciv 源码课程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+  <script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar"><strong>Unciv / 六边形策略游戏系统</strong><a href="index.html">课程路线</a><details class="topmenu"><summary>课程菜单</summary><div class="menu"><a href="index.html#phase-a">A · 全局模型 01～04</a><a href="index.html#phase-b">B · 地图专题 05～12</a><a href="index.html#phase-c">C · 经济专题 13～19</a><a href="index.html#phase-d">D · 系统联动 20～24</a><a href="index.html#phase-e">E · 工程与迁移 25～28</a></div></details><a href="reference/architecture.html">架构速查</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="#practice">检索练习</a></header>
+<div class="layout">
+<nav class="toc" aria-label="本课目录"><strong>12 / 地图怎样被看见</strong><a href="#goal">目标、回顾与场景</a><a href="#sight">1. 一格能看多远：视线算法</a><a href="#civview">2. 文明的视野账本：updateViewableTiles</a><a href="#fog">3. 两种迷雾：可见与探索过</a><a href="#screen">4. 画面层：TileGroup 与 TileGroupMap</a><a href="#trace">5. 追一次移动对视野与显示的影响</a><a href="#mental">心智模型</a><a href="#practice">检索与推演</a><a href="#reading">原文与复习</a><p class="meta">预计 45～60 分钟<br>需先完成第 06、11 课<br>含源码走读与推演练习<br>源码版本 1df6249</p></nav>
+<main id="main">
+<div class="eyebrow">第二阶段 / 地图专题 · 地图专题收官</div>
+<h1>地图怎样被看见</h1>
+<p class="lead">地图专题的最后一课。前七课地图被生成（07～10）、被行走（11），但一直假设“玩家看得见全图”。真实游戏里你只看得见自己单位周围的一圈，走过的地方留下灰暗的记忆，没去过的地方一片黑。这一课回答三个问题：<strong>一格单位能看多远、视线怎么被山和森林挡住？文明的“可见集合”谁在什么时候重算？画面上的迷雾、探索过、没去过三种格子分别是哪层代码画的？</strong>这也是第二课埋的钩子的兑现——当时说 viewableTiles“谁在什么时候重算它，第 12 课讲地图显示时再追”。</p>
+<p class="meta">需要的基础：第二课的 GameView/TileView 视角过滤（本课直接续上）；第六课的地形分层与 allTerrains；第十一课的 moveToTile 逐格落位（第 5 节的追踪起点）。源码版本：1df6249a41301056ddc4448a95a93ddf5403e061。</p>
+
+<section id="goal"><h2>目标、回顾与场景</h2>
+<p>三个场景都来自玩一局的体验。场景一：侦察兵站在丘陵上，能看见山后面那格的森林，却看不见山脚下紧挨着的平地——视线不是“半径几格的圆”，而是要翻越高度。这是第 1 节的视线算法。场景二：你的单位走远了，刚才那片地变暗，但地图上还留着农场和边界的“旧照片”；等单位走回来，才发现农场早被敌人拆了。这是第 2、3 节的可见集合与 lastSeenImprovement。场景三：同一张地图，几千个格子每格十来种贴图，放大缩小、点选高亮同时发生——这些画面元素怎么组织才不卡。这是第 4 节的 TileGroup 分层。</p>
+<div class="paired"><div><h3>本课的三个问题</h3><ul><li><strong>视线：</strong>getViewableTiles 按环推进时，“已见最高地形”怎么传递？山、丘陵、森林各是几层？</li><li><strong>账本：</strong>civ.viewableTiles 由哪几路来源拼成？单位移动、回合开始、读档分别在哪一步重算？</li><li><strong>画面：</strong>“看不见”（雾）、“探索过”（旧照片）、“没去过”（黑）三态分别由哪个查询和哪层图决定？</li></ul><p>读完还要会一件事：不看正文，对一个单位从 A 走到 B，说出哪些格子的画面会变、各变什么，并指出每一处调用的方法名。</p></div><div><h3>口述回顾：第六～十一课</h3><ol><li>第六课：环绕地图上 P(−1,1) 的 2 点钟邻居为什么是 R(2,−1)？河流公共边读哪个字段？</li><li>第七课：generateMap 十条阶段链里地形先有谁后有谁？新游戏与编辑器分支怎么判？</li><li>第八课：一个噪声值从 permutation 表到格子值经过哪几步？fade 为什么能让地形连成片？</li><li>第九课：山的阈值 0.7 比的是幂前还是幂后的数？河流三布尔存在哪一侧？</li><li>第十课：区域按什么切分？起点评价的三组下限查的是累计还是单环？</li><li>第十一课：代价判定链的顺序是什么？“能过”与“能停”为什么是两个问题？</li></ol><p>这六条是地图专题的全部地基，也是欠账的口述回顾——答不上的回对应课扫一眼，读完本课后欢迎把任意一条的口述发给教学助手。</p><p class="source"><a href="0006-tilemap.html">第六课：地块怎样组成地图</a><a href="0007-map-generation.html">第七课：地图生成流水线</a><a href="0008-landmass-climate.html">第八课：陆海与气候分布</a><a href="0009-elevation-rivers.html">第九课：山地与河流</a><a href="0010-starts-resources.html">第十课：可玩的出生地与资源</a><a href="0011-movement-pathing.html">第十一课：移动代价与寻路</a></p></div></div>
+<table><thead><tr><th scope="col">内容</th><th scope="col">约用时</th><th scope="col">读完应能说明</th></tr></thead><tbody><tr><td>视线算法</td><td>14 分钟</td><td>按环推进、maxHeightSeenToTile 传递、三种高度表</td></tr><tr><td>文明视野账本</td><td>12 分钟</td><td>setNewViewableTiles 的四路来源与五个触发时机</td></tr><tr><td>两种迷雾</td><td>12 分钟</td><td>isVisible/isExplored 的存储位置与 lastSeenImprovement</td></tr><tr><td>画面分层与追踪</td><td>14 分钟</td><td>TileGroup 十一层、TileGroupMap 按层重排、一次移动的更新链</td></tr></tbody></table>
+</section>
+
+<section id="sight"><h2>1. 一格能看多远：视线算法</h2>
+<p>视野的原子问题：<strong>站在 position、视野 sightDistance 的单位，能看见哪些格？</strong>入口是 <code>TileMap.getViewableTiles</code>（按 HexCoord 查）与它的包装 <code>Tile.getViewableTilesList</code>。它不是简单取“距离 ≤ sight 的所有格”——那就不需要这一节了。真实算法按环推进，每一格是否可见取决于<strong>来路上已见过的最高地形</strong>：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileMap.getViewableTiles（部分代码）。问：站在 (0,0) 视野 2，哪些格看得见？</span>
+val aUnitHeight = get(position).unitHeight          <span class="comment">// ① 站的地方有多高</span>
+val viewableTiles = mutableListOf(ViewableTile(
+    get(position), aUnitHeight,
+    isVisible = true, isAttackable = false))         <span class="comment">// ② 脚下永远可见</span>
+
+for (i in 1..sightDistance+1) {                     <span class="comment">// ③ 逐环处理，多算一环</span>
+    val tilesToAddInDistanceI = ArrayList&lt;ViewableTile&gt;()
+
+    forEachTileAtDistance(position, i) { cTile -&gt;
+        val cTileHeight = cTile.tileHeight           <span class="comment">// ④ 这格本身多高</span>
+
+        // 第 sight+1 环只有比脚下高的才可见（forAttack 除外）
+        if (i == sightDistance + 1 &amp;&amp;
+            (cTileHeight &lt;= aUnitHeight || forAttack))
+            return@forEachTileAtDistance             <span class="comment">// ⑤ 界外一环：只留高个</span>
+
+        val bMinimumHighestSeenTerrainSoFar = viewableTiles
+            .filter { it.tile.aerialDistanceTo(cTile) == 1 }
+            .minOf { it.maxHeightSeenToTile }        <span class="comment">// ⑥ 邻居里最低的“已见最高”</span>
+
+        tilesToAddInDistanceI.add(ViewableTile(
+            cTile,
+            max(cTileHeight, bMinimumHighestSeenTerrainSoFar),     <span class="comment">// ⑦ 传递：取大</span>
+            aUnitHeight &gt;= bMinimumHighestSeenTerrainSoFar
+                || cTileHeight &gt; bMinimumHighestSeenTerrainSoFar,  <span class="comment">// ⑧ 能看见它吗</span>
+            aUnitHeight &gt;= bMinimumHighestSeenTerrainSoFar
+                || cTile.unitHeight &gt; bMinimumHighestSeenTerrainSoFar)) <span class="comment">// ⑨ 能打它吗</span>
+    }
+    viewableTiles.addAll(tilesToAddInDistanceI)      <span class="comment">// ⑩ 本环算完才入账</span>
+}
+return viewableTiles.filter { it.isVisible }.map { it.tile }</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/TileMap.kt">本地 TileMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L486">ViewableTile · L486</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/TileMap.kt#L490">getViewableTiles · L490</a></p></div><div><p>脑内模型是<strong>站在山顶环顾四野</strong>：视线一圈圈往外走，每格手里拿两样东西——自己的身高，和“到我这格为止、来路上见过的最高障碍”这个门槛。轮到某一格判定：把它内圈邻居的门槛都摆出来，取<strong>最低</strong>的那条当标尺——只要有一条门槛够低，它就看得见。它再把 max（自己身高，这条最低门槛） 作为自己的新门槛，传给从它向外去的邻格——门槛像接力棒一圈圈往外传，一格比一格更“知道路上有多高”。遮挡根本不需要射线检测：被挡住的，是那些<strong>所有</strong>内圈入口都领到了高门槛、自己又不够高的格子。影子是门槛传着传着自己显现的，形状由六边形几何决定——轴线上的格只有 1 个内圈入口，正后方那格的全部来路都经过同一个高格，单个高格就能投出一条笔直的窄影（REPL 实测：(1,0) 一格森林恰好只挡掉正后方的 (2,0)，19→18）；斜角位置的格有 2 个内圈入口，单个高格喂不满两条来路，几乎挡不住身后的格，得成排的高地才封出一片盲区。</p><p>① <code>unitHeight</code> 是“站上去的高度”：平地 0、丘陵 1、山 2，由 <code>VisibilityElevation</code> unique 决定（原版只有 Mountain [+2] 和 Hill [+1]）。</p><p>② 起点格无条件可见，初始的“已见最高”就是脚下高度——所以站在山上（a=2）时，一环的丘陵（b=1）挡不住任何东西。</p><p>③ 循环到 sightDistance+1：多算一环界外的格子，这是“站在平地也能看见远处的山”的来源（下一行就过滤）。</p><p>④ <code>tileHeight</code> 与 unitHeight 的差别在“挡不挡同高视线”：带 <code>BlocksLineOfSightAtSameElevation</code> 的地形（原版 Forest、Jungle）tileHeight = unitHeight + 1——森林自身 0 高，但挡平地单位的视线；山和丘陵不带这条，所以丘陵挡不住丘陵上的单位。</p><p>⑤ 第 sight+1 环只保留“比脚下高”的格：视野 2 的平地单位能看见 3 格外的丘陵和山，但看不见 3 格外的平地。REPL 实测：全平地图视野 2 见 19 格；把 (3,0) 改成丘陵，恰好变 20 格。</p><p>⑥ 关键一步：对候选格取<strong>一环内邻居</strong>（aerialDistanceTo == 1，即上一层已入账的格），从中挑 maxHeightSeenToTile <strong>最小</strong>的——“最低的垭口决定能不能看见”。源码注释用 a（脚下）、b（路上最高）、c（目标）三个高度概括了全部场景：a≥b 时 b 不挡（平地看平地、丘陵连丘陵）；a&lt;b 时要么 c&gt;b（山冒出森林），要么看不见。</p><p>⑦ 每格记录自己的 maxHeightSeenToTile = max(自身高度, 来路最高)——传给下一环。这就是“高度沿视线传递”的实现。</p><p>⑧ 可见判定：a≥b（我比垭口高）或 c&gt;b（目标比垭口高，注意是 tileHeight）。REPL 实测：平地单位隔着一格森林看不见二环的平地和丘陵（19−1=18 格），但看得见二环的山（c=2&gt;b=1）。</p><p>⑨ 可打判定的尺子换成 unitHeight——“看得见”按 tileHeight、“打得着”按 unitHeight。丘陵+森林隔着丘陵位置时，tileHeight 那关过了，但 unitHeight 的 1 仍不大于垭口的 1，所以只能看不能打——测试 canSeeButNotAttackHillForestOverHill 钉死了这对判定的差别。远程攻击走 <code>getViewableTiles(position, sight, forAttack = true)</code>，界外一环也不放宽。</p><p>⑩ 本环全部算完才 addAll——同一环的格子不能互相“借道”：取邻居只从“已入账的更内圈”拿，循环开头那个攒本环结果的 ArrayList 就是干这个的（源码注释原话：“so we don't use tiles in the same distance to see over”）。</p></div></div>
+<p>高度从哪来：unitHeight/tileHeight 不是独立字段，而是 <code>setTerrainFeatures</code> 时按地形 unique 算出的 @Transient 缓存：</p>
+<div class="paired"><div><pre><code><span class="comment">// Tile.setTerrainFeatures 的高度计算（末尾几行）。问：这格“有多高、挡不挡视线”？</span>
+unitHeight = allTerrains.flatMap { it.getMatchingUniques(UniqueType.VisibilityElevation) }
+    .sumOf { it.params[0].toInt() }                  <span class="comment">// ① 各层高度相加</span>
+tileHeight = if (terrainHasUnique(UniqueType.BlocksLineOfSightAtSameElevation))
+    unitHeight + 1                                  <span class="comment">// ② 挡同高：再垫一层</span>
+else unitHeight</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L976">高度计算 · Tile.kt L976</a><a href="../../android/assets/jsons/Civ V - Vanilla/Terrains.json">Terrains.json（原版定义）</a></p></div><div><p>脑内模型是<strong>体检单打分</strong>：把格子叠的每种地形各查一遍“加几分、挡不挡人”，加总得身高。</p><p>① allTerrains 是第六课讲过的分层序列（基础地形 + 自然奇观 + 特征），每层带 VisibilityElevation 的都累加——原版只有 Mountain +2、Hill +1，所以丘陵+森林是 1（Forest 不加高度）。与移动代价查 lastTerrain 不同，这里<strong>逐层累加</strong>而非取最顶层。</p><p>② Forest/Jungle 带 "Blocks line-of-sight from tiles at same elevation"，tileHeight 比 unitHeight 多 1——效果是“挡住同高单位的视线”但“不挡更高单位的”。REPL 实测：丘陵+森林 unitHeight=1、tileHeight=2；平地+森林 unitHeight=0、tileHeight=1。</p></div></div>
+<table><thead><tr><th scope="col">格子</th><th scope="col">unitHeight（身高）</th><th scope="col">tileHeight（挡视线）</th><th scope="col">效果</th></tr></thead><tbody>
+<tr><td>平地</td><td>0</td><td>0</td><td>不挡任何人</td></tr>
+<tr><td>森林/丛林（平地上）</td><td>0</td><td>1</td><td>挡平地单位，不挡丘陵及更高</td></tr>
+<tr><td>丘陵</td><td>1</td><td>1</td><td>挡平地单位；丘陵上的单位看它如平地</td></tr>
+<tr><td>丘陵+森林</td><td>1</td><td>2</td><td>挡丘陵单位（能看见但打不着）；山仍能看见</td></tr>
+<tr><td>山</td><td>2</td><td>2</td><td>挡除山外的一切；自己永远可见</td></tr>
+</tbody></table>
+<p>这一节的所有行为都有测试钉着：<a href="../../tests/src/com/unciv/logic/map/VisibilityTests.kt">VisibilityTests</a>（本地测试文件）用 18 条用例枚举了高度组合——canSeeForestOverPlains、cannotSeePlainsOverForest、canSeeHillOverPlains、cannotSeeHillOverHill、canSeeMountainOverHill、cannotSeeMountainOverHillForest、canSeeElevation3Tiles、cannotSeeHiddenElevation3Tiles、canSeeButNotAttackHillForestOverHill……本课核对重跑 18 过 0 跳过 0 失败。</p>
+<aside class="callout"><strong>Godot 对照：可见性是数据问题，不是渲染问题</strong><p>直觉上“迷雾”像渲染效果（贴一层黑色遮罩），但这一节展示它是<strong>逻辑层的查询结果</strong>：getViewableTiles 纯读地形数据，输出一个集合，渲染只是消费它。Godot 里做战争迷雾同样建议先写“visibleTiles(civ) → Set&lt;Vector2i&gt;”的纯函数（用 Tokenized 高度数组 + 与本课相同的按环 DP），再让 TileMapLayer 按 set 差值刷贴图。Unciv 的“⑥ 取邻居最低垭口”是经典 symmetric shadowcasting 的简化版：六边形格数少，逐环遍历够快，不需要扇区裁剪那套复杂度。视差遮罩（森林挡半格）这类表现增强可以后加，只要数据层先对。</p></aside>
+</section>
+
+<section id="civview"><h2>2. 文明的视野账本：updateViewableTiles</h2>
+<p>上一节的算法回答“一个单位看哪些格”。但游戏里问得更多的是“<strong>这个文明</strong>现在看得见哪些格”——它要汇总所有单位、所有城市、盟友和间谍。这份账本存在 <code>Civilization.viewableTiles</code>（@Transient 的 Set&lt;Tile&gt;，第二课见过它），由 <code>CivInfoTransientCache.updateViewableTiles</code> 统一重算。这个类名直译是“文明瞬态缓存”——放的就是这类“算起来贵、存着又不用进存档”的东西：</p>
+<div class="paired"><div><pre><code><span class="comment">// CivInfoTransientCache.setNewViewableTiles（部分代码）。问：文明的可见集合怎么拼？</span>
+private fun setNewViewableTiles() {
+    if (civInfo.hasSpectatorVision() || DebugUtils.VISIBLE_MAP) {
+        civInfo.viewableTiles = civInfo.gameInfo.tileMap.values.toSet()   <span class="comment">// ① 观战/调试：全图</span>
+        return
+    }
+    if (civInfo.isDefeated()) {
+        civInfo.viewableTiles = emptySet()       <span class="comment">// ② 已灭：什么都看不见</span>
+        return
+    }
+
+    val newViewableTiles = HashSet&lt;Tile&gt;(ourTilesAndNeighboringTiles)    <span class="comment">// ③ 领土及邻格打底</span>
+    newViewableTiles.addAll(civInfo.units.getCivUnits()
+        .flatMap { unit -&gt; unit.viewableTiles.asSequence()
+            .filter { it.getOwner() != civInfo } })                      <span class="comment">// ④ 单位视野：去掉自家领土</span>
+
+    for (otherCiv in civInfo.getKnownCivs()) {
+        if (otherCiv.allyCiv == civInfo || otherCiv == civInfo.allyCiv) {
+            newViewableTiles.addAll(otherCiv.cities
+                .asSequence().flatMap { it.getTiles() })                 <span class="comment">// ⑤ 盟友城邦的领土</span>
+        }
+    }
+
+    newViewableTiles.addAll(civInfo.espionageManager.getTilesVisibleViaSpies())  <span class="comment">// ⑥ 间谍：驻地一环</span>
+
+    civInfo.viewableTiles = newViewableTiles    <span class="comment">// ⑦ 整表替换，防并发修改</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/civilization/transients/CivInfoTransientCache.kt">本地 CivInfoTransientCache.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoTransientCache.kt#L27">类注释 "This is a big performance" · L106</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoTransientCache.kt#L189">setNewViewableTiles · L189</a></p></div><div><p>脑内模型是<strong>公司的值班表</strong>：每个人（单位、城市、盟友、间谍）上报自己看得见什么，管理员不挑不拣全抄在一块白板上——谁走了擦掉重写，从不原地涂改。</p><p>① 观战者（spectator）与调试开关直接给全图。hasSpectatorVision 也覆盖“单人战败后转观战”的情况。</p><p>② 已灭文明置空——防止走进“前盟友的尸体领土”之类的幽灵视野（#9245）。</p><p>③ <code>ourTilesAndNeighboringTiles</code> 是另一个缓存（updateOurTiles 维护）：己方全部城市的格子加它们的邻居。领土本身永远“看得见”，所以账本先用它打底。单位在自家领土里挪动时，④ 的过滤让这次移动不触发整本重算（下一块讲）。</p><p>④ 每个单位带上自己第 1 节算好的视野，但滤掉“格主就是自己文明”的那部分——自家的地盘早就包含在上一步的打底里，没必要重复入账；而盟友领土上的自家单位视野照常入账（filter 只排除自己，不排除盟友）。</p><p>⑤ 已认识且互为宗主/盟友的城邦，其城市领土直接并入——联机的“共享视野”条款也走这条路。getKnownCivs 只含已认识的，没见过的文明不会白送视野。</p><p>⑥ 间谍驻扎的城市中心一环（EspionageManager.getTilesVisibleViaSpies，中心格 getTilesInDistance(1)）。</p><p>⑦ 算完整体替换引用而不是往旧集合里加——源码注释点名"to avoid concurrent modification problems"：别处正在迭代旧集合时，替换引用不会让它炸，原地改会。</p></div></div>
+<p>账本算完不只有画面用。updateViewableTiles 的外层还做四件事，每一件都是“看见”在逻辑上的后果：</p>
+<div class="paired"><div><pre><code><span class="comment">// updateViewableTiles 的后半段（部分代码）。问：看见之后，游戏还做了什么？</span>
+fun updateViewableTiles(explorerPosition: HexCoord? = null) {
+    setNewViewableTiles()                            <span class="comment">// ① 拼账本（上一块）</span>
+
+    updateViewableInvisibleTiles()                   <span class="comment">// ② 谁能看见隐身单位</span>
+    updateLastSeenImprovements()                     <span class="comment">// ③ 刷新改良的旧照片</span>
+
+    civInfo.viewableTiles.asSequence().forEach { tile -&gt;
+        tile.setExplored(civInfo, true, explorerPosition)
+    }                                                <span class="comment">// ④ 可见必已探索：记账</span>
+
+    val viewedCivs = HashMap&lt;Civilization, Tile&gt;()
+    for (tile in civInfo.viewableTiles) {
+        val tileOwner = tile.getOwner()
+        if (tileOwner != null) viewedCivs[tileOwner] = tile
+        val unitOwner = tile.getFirstUnit()?.civ
+        if (unitOwner != null) viewedCivs[unitOwner] = tile
+    }                                                <span class="comment">// ⑤ 这次看见了谁家的地/单位</span>
+
+    if (!civInfo.isBarbarian) {
+        for (entry in viewedCivs) {
+            val metCiv = entry.key
+            if (metCiv == civInfo || metCiv.isBarbarian
+                || civInfo.diplomacy.containsKey(metCiv.civID)) continue
+            civInfo.diplomacyFunctions.makeCivilizationsMeet(metCiv)   <span class="comment">// ⑥ 初见建交</span>
+            // 双方各收一条 "We have encountered ..." 通知（略）
+        }
+        discoverNaturalWonders()                     <span class="comment">// ⑦ 首见自然奇观</span>
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/civilization/transients/CivInfoTransientCache.kt">本地 CivInfoTransientCache.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/transients/CivInfoTransientCache.kt#L107">updateViewableTiles · L107</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L1198">setExplored · Tile.kt L1198</a></p></div><div><p>脑内模型是<strong>巡逻队交班</strong>：换班时白板重写，随后班长逐项交代——谁在盯隐身、照片墙更新、新到的地方画进地图、今天碰见了谁。</p><p>① setNewViewableTiles 重写账本——四路来源见上一块。</p><p>② viewableInvisibleUnitsTiles：带 CanSeeInvisibleUnits unique 的单位（如驱逐舰反潜）额外看见的隐身单位所在格，海军战斗用它过滤“看得见潜艇吗”。</p><p>③ 对视野内每格 civInfo.setLastSeenImprovement(tile.position, tile.improvement)——把“现在看到的改良”存进文明的记忆表（AI 跳过，它们不看画面）。第 3 节展开。</p><p>④ <strong>可见必已探索</strong>：viewableTiles 里的每格都调 tile.setExplored(civInfo, true)，往 Tile.exploredBy（格子上存的一张“谁探索过我”名单，序列化字段）里加自己的 civID。注意方向：可见集合是文明持引用的 @Transient，探索名单是格子持有的存档数据——一份算出来就扔，一份永久记录。</p><p>⑤ 扫一遍新账本，收集“这格是谁的领土/上面站着谁家的单位”，映射到任一可见格。</p><p>⑥ 没打过照面的文明第一次被看见：makeCivilizationsMeet 建立外交关系，双方各收一条相遇通知。视野系统在这里顺便驱动了外交——这就是“看见”作为逻辑事件的分量。</p><p>⑦ 自然奇观首见：加通知、给首见奖励（GrantsStatsToFirstToDiscover）、触发 Unique——REPL 复现时可观察到 discoverNaturalWonders 在每次 updateViewableTiles 里被调用。</p></div></div>
+<p>谁在什么时候调用这份账本？记忆点是一句反直觉的话：<strong>单位移动不重算文明账本，除非视野真的变了</strong>。入口在 MapUnit.updateVisibleTiles：</p>
+<div class="paired"><div><pre><code><span class="comment">// MapUnit.updateVisibleTiles（部分代码）。问：单位挪一步，账本什么时候重算？</span>
+fun updateVisibleTiles(updateCivViewableTiles: Boolean = true,
+                       explorerPosition: HexCoord? = null) {
+    val oldViewableTiles = viewableTiles
+
+    viewableTiles = when {
+        hasUnique(UniqueType.NoSight) -&gt; hashSetOf(getTile())      <span class="comment">// ① 零视野：只见脚下</span>
+        hasUnique(UniqueType.CanSeeOverObstacles) -&gt;
+            getTile().getTilesInDistance(getVisibilityRange()).toHashSet()
+                                                                   <span class="comment">// ② 无视遮挡：几何圆</span>
+        else -&gt; getTile().getViewableTilesList(getVisibilityRange()).toHashSet()
+    }                                                              <span class="comment">// ③ 正常：第 1 节算法</span>
+
+    val shouldUpdateTiles = updateCivViewableTiles
+        &amp;&amp; oldViewableTiles != viewableTiles                     <span class="comment">// ④ 集合没变就免算</span>
+        &amp;&amp; (oldViewableTiles.any { it !in civ.cache.ourTilesAndNeighboringTiles }
+            || viewableTiles.any { it !in civ.cache.ourTilesAndNeighboringTiles })
+                                                                   <span class="comment">// ⑤ 全在自家领土内也免算</span>
+
+    if (!shouldUpdateTiles) return
+
+    // TriggerUponDiscoveringTile 的触发（略）
+
+    civ.cache.updateViewableTiles(explorerPosition)                <span class="comment">// ⑥ 真要变：整本重算</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/mapunit/MapUnit.kt">本地 MapUnit.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/MapUnit.kt#L822">updateVisibleTiles · L822</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/MapUnit.kt#L424">getVisibilityRange · L424</a></p></div><div><p>脑内模型是<strong>值夜班要不要叫醒主管</strong>：哨兵自己先把新视野算好，对比旧视野——没变化、或者新旧都在自家院墙内，就不惊动主管；否则上报，主管整本重写。</p><p>① NoSight 单位（攻城锤之类原版没有、模组可能有的）视野只剩脚下——注意不是空集，自己站的那格总看得见。</p><p>② CanSeeOverObstacles（如飞行单位）跳过视线判定，几何距离内全可见——"it's that simple"是源码原注释。</p><p>③ 普通单位走第 1 节的按环算法。getVisibilityRange 默认 2，Sight unique 增减（原版：Scout 升级 +1、Conquistador +2、Catapult/Cannon 系列 −1），最低 1。</p><p>④ Set 相等比较：两次视野覆盖同一批格子就不重算。REPL 实测：视野 2 的单位在开阔地平移一格，新旧视野都是 19 格且高度重合——集合确实不等（各多出 5 格），触发重算；但在自家领土内来回走，⑤ 把它拦下。</p><p>⑤ 性能闸门：领土及邻格本来就永远可见（上一步的打底缓存），若新旧视野全落在其中，文明账本不会因这次移动而变。守家的单位挪动近乎免费。</p><p>⑥ 真触发时，连 explorerPosition（当前位置坐标，供 setExplored 记账用）一起传下去。调用方除了单位移动（moveThroughTile 末尾、destroy、gift、升级），还有回合开始（TurnManager.startTurn L61，源码注释：补上探索格让 AI 自动化更好决策）、城市扩张/吞并（updateOurTiles 末尾）、读档（GameInfo.setTransients 里 updateSightAndResources，注释强调“每个单位只算一次自己的、文明汇总只跑一遍——巨大的性能节省”）。这一处就是第二课那个钩子的完整答案。</p></div></div>
+</section>
+
+<section id="fog"><h2>3. 两种迷雾：可见与探索过</h2>
+<p>画面上“看得见的格子”其实有两种状态：当前被观测（单位/领土/间谍的视野之内，颜色鲜亮、单位实时刷新）与<strong>曾经被观测过</strong>（灰暗、显示的是记忆中的地形和改良）。加上从未去过的黑格，一共三态。判定的两个入口都在 Tile 上：</p>
+<div class="paired"><div><pre><code><span class="comment">// Tile.kt 的两个判定与一张名单（摘录）。问：这格对某文明是什么状态？</span>
+<span class="comment">/** Actively observed tiles (no fog of war) */</span>
+fun isVisible(player: Civilization): Boolean {
+    if (DebugUtils.VISIBLE_MAP) return true
+    return player.viewableTiles.contains(this)     <span class="comment">// ① 正在被观测：查文明账本</span>
+}
+
+<span class="comment">/** Tiles that at some point have been explored (may have fog of war) */</span>
+fun isExplored(player: Civilization): Boolean {
+    if (DebugUtils.VISIBLE_MAP || player.isSpectator()) return true
+    return exploredBy.contains(player.civID)       <span class="comment">// ② 探索过：查格子上的名单</span>
+}
+
+<span class="comment">// Tile 的序列化字段：谁探索过我</span>
+private var exploredBy = HashSet&lt;String&gt;(0)         <span class="comment">// ③ 名单本身进存档</span>
+
+fun setExplored(player: Civilization, isExplored: Boolean,
+                explorerPosition: HexCoord? = null) {
+    if (isExplored) {
+        if (!exploredBy.contains(player.civID)) {
+            GUI.clearUndoCheckpoints()              <span class="comment">// ④ 新探索：禁用撤销</span>
+            exploredBy = exploredBy.withItem(player.civID)
+        }
+        if (player.playerType == PlayerType.Human)
+            player.exploredRegion.checkTilePosition(position, explorerPosition)
+    } else {
+        exploredBy = exploredBy.withoutItem(player.civID)
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L306">isVisible · L306</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L314">isExplored · L314</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L1198">setExplored · L1198</a></p></div><div><p>脑内模型是<strong>灯光与地图</strong>：账本是此刻哪几盏灯亮着，关灯房间立刻暗；名单是你自己一张张画过的地图区域，灯灭后那一块仍在——只是不再更新。</p><p>① isVisible 是“瞬时”问题，答案随单位每一步变化；它读的就是第 2 节那份 @Transient 账本，<strong>不进存档</strong>。</p><p>② isExplored 是“历史”问题：格子上存一张 civID 名单，进去过就留名，灯灭了名单还在。</p><p>③ 这份名单是存档数据而不是缓存——随 Tile 一起序列化，读档后原样恢复。与 viewableTiles 恰成对照：可见集合 = 文明持引用（易失），探索名单 = 格子持 ID（持久）。关系恒成立：可见 ⇒ 已探索（上一块那行 forEach 每次重算都保证），已探索未必可见。</p><p>④ 新探索一格会调 GUI.clearUndoCheckpoints()：玩家“探开一块新地图”是不可撤销的动作——撤销快照（GameInfo.clone）会带上 exploredBy，允许“看了又装没看”会破坏信息公平，干脆禁掉。</p></div></div>
+<p>名单之外还有一份派生缓存：setExplored 的最后一行把新探索格的坐标交给 <code>exploredRegion.checkTilePosition</code>——它把已探索区域收缩成一个经纬度矩形（只往大调），小地图拿它裁剪“值得绘制的范围”和相机活动区。规则是宁可多画不可漏画——矩形而非精确集合，是“够用就好”的典型取舍。</p>
+<p>“曾经被观测过”的格子显示的是<strong>旧照片</strong>。地形本身不变（地图生成后地形就是定数），但改良（农场、矿）会被敌人拆掉、单位会移动。地形直接显示真实值，改良和单位走记忆：</p>
+<div class="paired"><div><pre><code><span class="comment">// Tile.getShownImprovement 与 updateLastSeenImprovements（摘录）。问：雾里那格显示什么改良？</span>
+fun getShownImprovement(viewingCiv: Civilization?): String? =
+    if (viewingCiv == null || viewingCiv.playerType == PlayerType.AI
+        || viewingCiv.isSpectator()) improvement    <span class="comment">// ① AI/观战/无视角：真值</span>
+    else viewingCiv.getLastSeenImprovement(position)  <span class="comment">// ② 人类玩家：记忆值</span>
+
+<span class="comment">// cache 里的记忆刷新</span>
+private fun updateLastSeenImprovements() {
+    if (civInfo.playerType == PlayerType.AI) return  <span class="comment">// ③ AI 不维护记忆</span>
+    for (tile in civInfo.viewableTiles)
+        civInfo.setLastSeenImprovement(tile.position, tile.improvement)  <span class="comment">// ④ 看得见的格：拍新照</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/logic/map/tile/Tile.kt">本地 Tile.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/tile/Tile.kt#L390">getShownImprovement · L390</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/civilization/Civilization.kt#L1293">setLastSeenImprovement · Civilization L1293</a></p></div><div><p>脑内模型是<strong>现场拍照存档</strong>：在场就对着实物拍一张存进相册，离开后画面挂的是最后一张照片，回来再拍、照片自动更新。</p><p>① 判定按“谁在看”分流：AI/观战/无视角（地图编辑器）读 Tile.improvement 真值。</p><p>② 人类玩家读相册——civ.lastSeenImprovement 是一张坐标→改良名的表，随存档走（它是 Civilization 的序列化字段，不是缓存）。</p><p>③ AI 跳过的理由源码写得很直白：“they don't really use the info anyway”——AI 读真值，无需为它维护两套。这是“表现层记忆”与“逻辑层真值”的干净分界：记忆只服务人类玩家的画面。</p><p>④ 拍照只发生在“看得见”期间：updateLastSeenImprovements 遍历的是 viewableTiles——雾里的拆改不会被记下。REPL 实测：视野内建 Farm → 移出视野 → 视野外拆掉 → getShownImprovement 仍返回 Farm；单位走回视野，下一次 updateViewableTiles 把真值 null 写进相册，画面同步消失。</p></div></div>
+<aside class="callout"><strong>排查思路：显示不对，先问三态的哪一态</strong><p>遇到“农场还在但点进去没有”“敌人单位看不见”这类问题，先定位格子状态：isVisible（查 civ.viewableTiles）？isExplored（查 tile.exploredBy）？还是都没探索？再看数据源：画面读的是 Tile.improvement 真值还是 getLastSeenImprovement 记忆值？单位可见性则走 TileView.militaryUnit 的 isVisible(unit) 过滤（第二课讲过）。三态定位错，往下查全是白忙。</p></aside>
+</section>
+
+<section id="screen"><h2>4. 画面层：TileGroup 与 TileGroupMap</h2>
+<p>逻辑侧齐了，看画面。一张几千格的地图，每格十来张图（地形、特征、边界、资源、改良、单位、旗子……），全部塞进一个场景图会让遍历和点击检测互相拖累。Unciv 的答案是两层结构：<strong>每格一个 TileGroup，把这一格的所有图收进十一个子层；整张地图一个 TileGroupMap，再把所有格子的同类子层收进十二个全图层</strong>。先看格子这半边：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileGroup 的字段与 update（部分代码）。问：一格的画面怎么组织、怎么刷新？</span>
+open class TileGroup(
+    tileView: TileView,
+    val tileSetStrings: TileSetStrings,
+    groupSize: Float = TileGroupMap.groupSize + 4
+) : Group() {
+    @Suppress("LeakingThis") val layerTerrain = TileLayerTerrain(this, groupSize)      <span class="comment">// ① 地形底图+河流</span>
+    @Suppress("LeakingThis") val layerFeatures = TileLayerFeatures(this, groupSize)    <span class="comment">// ② 道路</span>
+    @Suppress("LeakingThis") val layerBorders = TileLayerBorders(this, groupSize)      <span class="comment">// ③ 文明边界</span>
+    @Suppress("LeakingThis") val layerMisc = TileLayerMisc(this, groupSize)            <span class="comment">// ④ 杂项+人口图标</span>
+    @Suppress("LeakingThis") val layerResource = TileLayerResource(this, groupSize)    <span class="comment">// ⑤ 资源</span>
+    @Suppress("LeakingThis") val layerImprovement = TileLayerImprovement(this, groupSize)   <span class="comment">// ⑥ 改良层</span>
+    @Suppress("LeakingThis") val layerYield = TileLayerYield(this, groupSize)          <span class="comment">// ⑦ 产出数字</span>
+    @Suppress("LeakingThis") val layerOverlay = TileLayerOverlay(this, groupSize)      <span class="comment">// ⑧ 高亮+雾+未探索</span>
+    @Suppress("LeakingThis") val layerUnitArt = TileLayerUnitSprite(this, groupSize)   <span class="comment">// ⑨ 单位立绘</span>
+    @Suppress("LeakingThis") val layerUnitFlag = TileLayerUnitFlag(this, groupSize)    <span class="comment">// ⑩ 单位旗</span>
+    @Suppress("LeakingThis") val layerCityButton = TileLayerCityButton(this, groupSize) <span class="comment">// ⑪ 城市按钮</span>
+
+    fun isViewable(viewingCiv: CivView) = isForceVisible
+        || viewingCiv.canSeeTile(tileView)            <span class="comment">// ⑫ 本格是否"正被观测"</span>
+
+    open fun update(viewingCiv: CivView? = null) {
+        // ...换 tileView 到当前视角、清高亮（略）
+
+        // Do not update layers if tile is not explored by viewing player
+        if (viewingCiv != null &amp;&amp; !(isForceVisible
+            || viewingCiv.hasExplored(tileView))) {    <span class="comment">// ⑬ 没探索过：两层待遇</span>
+            if (tileView.getVisibleNeighbors().none()) {
+                setAllLayersVisible(false)             <span class="comment">// ⑭ 周围全黑：整格隐藏</span>
+            } else {
+                setAllLayersVisible(true); reset()     <span class="comment">// ⑮ 有探索过的邻居：画未知纹理</span>
+                layerOverlay.setUnexplored(viewingCiv)
+            }
+            return
+        }
+        setAllLayersVisible(true)
+        for (layer in allLayers) layer.update(viewingCiv)  <span class="comment">// ⑯ 正常：逐层自刷</span>
+    }
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/ui/components/tilegroups/TileGroup.kt">本地 TileGroup.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/components/tilegroups/TileGroup.kt#L14">TileGroup · L14</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/components/tilegroups/TileGroup.kt#L102">update · L102</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/components/tilegroups/WorldTileGroup.kt">WorldTileGroup.kt</a></p></div><div><p>脑内模型是<strong>一格一格的画板架</strong>：每格一个架子，十一层透明胶片从下往上叠（地形在底、城市按钮在顶）；刷画面时架主按观众身份决定哪些层画什么。</p><p>①②③④⑤⑥⑦⑧⑨⑩⑪ 层的顺序就是绘制顺序，从地形底图到城市按钮自下而上叠好。与三态直接相关的两处：改良层读 getShownImprovement（第 3 节的记忆值）；overlay 层住着雾（fog，半透明六边形）、未探索贴图（unexplored）、高亮和准星——同一个层管“这格的可见性外观”。</p><p>⑫ isViewable 转发到 CivView.canSeeTile → Tile.isVisible(civ)——账本的唯一画面消费入口。判断“被看见”从来不是渲染层自己算的。</p><p>⑬ 三态在 update 里分道：没探索过的格子（isExplored 为假）不再走正常刷新。</p><p>⑭ 连一个探索过的邻居都没有：全部层隐藏——纯粹的黑格，连地形都不画（省下的不只是绘制，还有逐层 update 的 CPU）。</p><p>⑮ 有探索过的邻居：层显示但 reset 清空内容，再盖一张 unexplored 贴图——格子只呈现地图边缘的“未知纹理”，不透露地形细节；连一个已探索邻居都没有时才整格隐藏（两者都不显示山地形状）。getVisibleNeighbors 过滤的就是邻居里的已探索格。</p><p>⑯ 正常路径：每层自己 update，各读各的数据源（地形层读 allTerrains、资源层查 canSeeResource、改良层读记忆）。WorldTileGroup 子类在最后追加 updateWorkedIcon——设置里开 Overlay 且“我的城市正在工作这格”时画小锤子图标，四个条件里就有 isViewable(viewingCiv)（看得见才有意义）。</p></div></div>
+<p>再看地图这半边。TileGroupMap 把几千个 TileGroup 重新按“层类型”归堆，同时管住点击和环绕：</p>
+<div class="paired"><div><pre><code><span class="comment">// TileGroupMap 的 init（部分代码）。问：几千个画板架怎么挂上墙？</span>
+init {
+    for (tileGroup in tileGroups) {
+        val positionalVector = HexMath.hex2WorldCoords(tileGroup.tileView.position())
+        tileGroup.setPosition(
+            positionalVector.x * 0.8f * groupSize,     <span class="comment">// ① 第五课的换算：坐标→屏幕</span>
+            positionalVector.y * 0.8f * groupSize)
+        // ...维护 topX/topY/bottomX/bottomY（略）
+    }
+    for (group in tileGroups) group.moveBy(-bottomX, -bottomY)   <span class="comment">// ② 搬到正象限</span>
+
+    val terrainMapLayer   = TerrainMapLayer(numberOfTilegroups)    <span class="comment">// ③ 十二个全图层</span>
+    val featureMapLayer   = FeaturesMapLayer(numberOfTilegroups)
+    // ... resourceMapLayer / improvementMapLayer / miscMapLayer / yieldMapLayer
+    val tileGroupLayer    = object: Group() { /* 只注册点击，不画 */ }   <span class="comment">// ④ 架子们的"影子层"</span>
+    // ... unitFlagMapLayer / cityButtonMapLayer
+
+    val sortedGroups = tileGroups.groupBy { it.tile.position.x + it.tile.position.y }
+        .entries.sortedByDescending { it.key }.flatMap { it.value }     <span class="comment">// ⑤ 按行分桶再排序</span>
+
+    for (group in sortedGroups) {
+        terrainMapLayer.add(group.layerTerrain, group.x, group.y)      <span class="comment">// ⑥ 同类子层进同层</span>
+        featureMapLayer.add(group.layerFeatures, group.x, group.y)
+        // ...其余十类同样注册
+    }
+    for (group in tileGroups) tileGroupLayer.addActor(group)           <span class="comment">// ⑦ 架子本体进影子层</span>
+}</code></pre><p class="source"><a href="../../core/src/com/unciv/ui/components/tilegroups/TileGroupMap.kt">本地 TileGroupMap.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/components/tilegroups/TileGroupMap.kt#L23">TileGroupMap · L23</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/components/tilegroups/layers/TileMapLayer.kt">TileMapLayer.kt</a><a href="../../docs/Developers/Map-rendering.md">官方地图渲染说明</a></p></div><div><p>脑内模型是<strong>先按格子分袋、上架时倒过来按类别装箱</strong>：每个袋子（TileGroup）里都有十一样货，上架时把所有袋子的“地形”货倒进地形箱、“单位”货倒进单位箱——十二个箱子按固定顺序摞好，就是玩家看到的画面。</p><p>① 位置换算用的正是第五课的 hex2WorldCoords（屏幕 y 向上），乘 0.8×groupSize（40 单位）落到世界坐标。环绕图（worldWrap）对需要“展开到另一侧”的 TileGroup 改用 getUnwrappedPosition 后的坐标。</p><p>② x、y 可能为负（地图围绕原点），整体平移到正象限， scrolls 才好算边界。</p><p>③ TerrainMapLayer 等十二个容器各收全图同类层。收益一：非交互层 touchable=disabled，点击检测在层边界就短路，不用钻进几千个子 Actor；收益二：act 只跑 actable 的层（资源、改良、单位旗等少数）。</p><p>④ tileGroupLayer 是个不绘制的 Group，专门收 TileGroup 本体做点击检测——点击命中的是“格子”（WorldTileGroup），由此拿到 tileView；它被压在 misc 层下面，城市工作图标的点击优先。</p><p>⑤ 排序键 x+y 正是第五课的“纬度”（同一水平行）。直接 sortedByDescending 全体排序内存开销大（源码注释），先 groupBy 行号再排桶、桶内保持原序，省下对象比较。</p><p>⑥ add 做的事：把子层缓冲的图元按格子绝对坐标 flush 进全图层。绘制顺序由此定型：同层内按行排（下行先画），层间按 allMapLayers 顺序——地形永远在边界下面，单位旗永远在最上。为什么这个顺序就是正确顺序：斜视角六边形里，靠下的格子应该压住靠上的（近大远小），行排序保证了它。</p><p>⑦ TileGroup 本体进的是影子层——十二层里唯一“不画只收点击”的一层；点中的是格子本身，随后拿到它挂的 tileView。</p></div></div>
+<p>WorldScreen 每次刷新地图，走的是一个总入口：</p>
+<div class="paired"><div><pre><code><span class="comment">// WorldMapTileUpdater.updateTiles 与 WorldScreen 的调用（摘录）。问：谁来刷全部格子？</span>
+fun WorldMapHolder.updateTiles(civView: CivView) {
+    val viewingCiv = civView.getCiv()
+
+    if (isMapRevealEnabled(civView)) { /* 调试全开：一次性全探索（略） */ }
+
+    for (tileGroup in tileGroups.values)
+        tileGroup.update(civView)                    <span class="comment">// ① 全图逐格刷</span>
+
+    val unitTable = worldScreen.bottomUnitTable
+    when {
+        unitTable.selectedSpy != null -&gt; { /* 间谍视角（略） */ }
+        unitTable.selectedCity != null -&gt; { updateBombardableTilesForSelectedCity(city) }
+        unitTable.selectedUnit != null -&gt; {
+            for (unitView in unitTable.selectedUnits) updateTilesForSelectedUnit(unitView)
+        }                                             <span class="comment">// ② 选中单位：再叠高亮</span>
+        else -&gt; { if (unitActionOverlays.isNotEmpty()) removeUnitActionOverlay() }
+    }
+    zoom(scaleX)                                      <span class="comment">// ③ 重设缩放</span>
+}
+
+<span class="comment">// WorldScreen.update（每次界面刷新的调用点）：</span>
+mapHolder.updateTiles(getGameViewConsideringForOfWar().civView)   <span class="comment">// ④ 换个视角即整图重刷</span></code></pre><p class="source"><a href="../../core/src/com/unciv/ui/screens/worldscreen/worldmap/WorldMapTileUpdater.kt">本地 WorldMapTileUpdater.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/worldmap/WorldMapTileUpdater.kt#L19">updateTiles · L19</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/ui/screens/worldscreen/WorldScreen.kt#L430">WorldScreen 调用点 · L430</a></p></div><div><p>脑内模型是<strong>百货商场换季</strong>：先全体员工把各自货架按新价目统一换一遍，然后只给聚光灯照到的柜台追加布置。</p><p>① 没有增量更新——每次全图逐格 update，每格按第 3、4 节的三态和层逻辑自刷。听起来贵，但每层 update 内部都是“没变就早退”（贴图 ID 相同直接 return），实际开销是几万次字符串比较。</p><p>② 选中单位/城市/间谍后，把移动范围、攻击目标、建城建议等高亮<strong>另画在 overlay 层</strong>——第 11 课的高亮圈、准星都在这叠加。选中的是 MapUnitView（视角包装），不是裸 MapUnit——界面永远走 View 这条家规。</p><p>③ zoom 复位顺带调城市按钮尺寸。</p><p>④ 调用方传的 civView 来自 getGameViewConsideringForOfWar()：观战者可以临时“代入”某个文明的视角（体验它的迷雾），fogOfWar 开关切换 selectedGameView 与 spectatorGameView——同一张地图、同一批 TileGroup，换一个 civView 全部重刷，就是视角层解耦的直接红利。</p></div></div>
+</section>
+
+<section id="trace"><h2>5. 追一次移动对视野与显示的影响</h2>
+<p>最后把全链串起来。场景：视野 2 的勇士在开阔平地上从 (0,0) 走两格到 (0,2)，你正盯着屏幕。从点击到画面的完整时序：</p>
+<div class="paired"><div><pre><code><span class="comment">// 一次移动的调用链（各方法分散在四个文件，按时间顺序拼排）。</span>
+<span class="comment">// 问：从“右键点 (0,2)”到“画面亮起新视野”，路上发生了什么？</span>
+// WorldMapHolder.addClickListener 的 tap：
+onTileRightClicked(unit, child.tileView)             <span class="comment">// ① 点击：拿到的是 TileView</span>
+
+// UnitMovement.moveToTile：
+val distanceToTiles = getDistanceToTiles(...)
+val pathToDestination = distanceToTiles.getPathToTile(destination)
+for (tile in pathToLastReachableTile) {
+    if (unit.movement.canMoveTo(tile, ...)) {
+        unit.useMovementPoints(passingMovementSpent)
+        unit.removeFromTile()
+        unit.putInTile(tile)                         <span class="comment">// ② 逐格落位（第 11 课）</span>
+    }
+}</code></pre>
+<pre><code>// MapUnit.putInTile → moveThroughTile（每经过一格都跑）：
+updateVisibleTiles(true, currentTile.position)       <span class="comment">// ③ 视野先于画面</span>
+
+// MapUnit.updateVisibleTiles：
+viewableTiles = getTile().getViewableTilesList(2)    <span class="comment">// ④ 第 1 节算法算新视野</span>
+// ⑤ 新旧集合不等且不全在自家领土 →
+civ.cache.updateViewableTiles(explorerPosition)
+
+// CivInfoTransientCache.updateViewableTiles：
+setNewViewableTiles()                                <span class="comment">// ⑥ 重写文明账本</span>
+updateLastSeenImprovements()                         <span class="comment">// ⑦ 新进视野的格拍照</span>
+viewableTiles.forEach { it.setExplored(civ, true, explorerPosition) }
+                                                     <span class="comment">// ⑧ 新格记进 exploredBy</span>
+// makeCivilizationsMeet / discoverNaturalWonders（⑨ 若有初见）</code></pre>
+<pre><code>// 回到 GL 线程，WorldScreen.update：
+mapHolder.updateTiles(civView)                       <span class="comment">// ⑩ 全图逐格重刷</span>
+
+// TileGroup.update（每格）：
+if (!viewingCiv.hasExplored(tileView)) { /* 三态分支 */ }
+for (layer in allLayers) layer.update(viewingCiv)    <span class="comment">// ⑪ 各层读新数据</span>
+// layerOverlay：新可见的格摘掉 fog；新探索的格摘掉 unexplored
+// layerTerrain：被雾罩的格颜色向 fogOfWarColor lerp 0.6
+// layerImprovement：新可见格画 getShownImprovement 的记忆/真值</code></pre><p class="source"><a href="../../core/src/com/unciv/ui/screens/worldscreen/worldmap/WorldMapHolder.kt">本地 WorldMapHolder.kt</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/movement/UnitMovement.kt#L488">moveToTile · L488</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/MapUnit.kt#L1029">moveThroughTile 调 updateVisibleTiles · L1029</a><a href="https://github.com/yairm210/Unciv/blob/1df6249a41301056ddc4448a95a93ddf5403e061/core/src/com/unciv/logic/map/mapunit/MapUnit.kt#L856">updateViewableTiles 调 cache · L856</a></p></div><div><p>脑内模型是<strong>快递链路</strong>：点击下单、货车逐站卸货、司机每到一站先向总部报新覆盖区、总部改完账本橱窗才统一换新。账本永远先于画面，画面从不自己算账。</p><p>① 点击拿到 TileView（tileGroupLayer 命中的 WorldTileGroup 上挂着），随后右键移动把单位与目标交给 UnitMovement。</p><p>② 第 11 课的 moveToTile：沿路径逐格扣移动力、putInTile 落位。山里撞出未知障碍中断重算也在这层。</p><p>③ putInTile → moveThroughTile 的<strong>最后一行</strong>就是 updateVisibleTiles(true, currentTile.position)——单位每物理落位一格，视野立刻跟新。explorerPosition 参数就是这一格的坐标，传下去给 setExplored 记“从哪个方向探索的”（环绕图的 exploredRegion 用它判断该往哪边扩）。</p><p>④⑤ 新旧 viewableTiles 集合比较＋自家领土判定（第 2 节的值夜班模型）。开阔平地移动两格：旧视野 19 格、新视野 19 格，各自有 5 格不在对方里——集合不等，重算。REPL 实测：从 (0,0) 到 (1,0)，exploredBy 名单从 19 格涨到 24 格（19+5，新进 5 格全部记名）。</p><p>⑥⑦⑧⑨ 文明账本整本重写：新视野并入、拍照、记探索名单、（若有）建交与首见奇观。到这里为止全是逻辑侧，没有任何 Actor 被触碰——跨线程安全正是靠这个顺序保证的（后台线程算逻辑，GL 线程画画面）。</p><p>⑩ WorldScreen.update（GL 线程）调 updateTiles，全图逐格走三态分支。新探索的 5 格从“整格隐藏/露轮廓”转为正常绘制，新离开视野的 5 格被盖上 fog（layerTerrain 同步向 fogOfWarColor 变暗，layerOverlay 盖半透明六边形），仍可见的 14 格无变化（各层早退）。</p><p>⑪ 玩家看到的效果：队伍身后暗下去、前方亮起来，山后的森林翻过垭口才出现——全部由同一次 updateTiles 完成，没有任何“移动动画”专属代码。若中途撞见敌国单位，⑨ 的 makeCivilizationsMeet 已经在逻辑侧写好了通知，弹窗只是消费它。</p></div></div>
+<p>地图专题到此收官。回头看 B 表的验收目标——“从生成参数到地块数据、出生点、寻路和显示，画出各环节如何使用前面生成的数据”——你现在拥有的链条是：地图参数与噪声（07、08）造出地形高度（09），高度既喂给移动代价（11 的 Hill 2/山不可行）也喂给视线算法（本课 ⑦ 的 maxHeightSeenToTile）；出生点评价（10）消费的粮食与生产力，将来就是第 13 课产出系统的输入。C 表的经济专题从下一课开始。</p>
+<aside class="callout"><strong>Godot 对照：三态渲染映射到你的项目</strong><p>Godot 4.x 的 TileMapLayer 天然适合“按层分类”：地形层、装饰层、单位层各一个，与 TileGroupMap 的十二层同构。三态迷雾的推荐做法：一张自定义的 per-tile 可见性枚举（unexplored / explored / visible）存在游戏数据里（对应 exploredBy 名单 + viewableTiles 账本），渲染层用一张覆盖全图的 CanvasLayer 或 shader 按枚举刷透明度；“explored 显示旧照片”则把 lastSeenImprovement 做成 Dictionary&lt;Vector2i, String&gt;，与 Unciv 的 LastSeenImprovement 同构。有两个 Unciv 值得抄的细节：一、新探索禁用 undo——任何“信息增益”都该禁；二、账本整表替换而非原地改——Godot 的信号系统下，替换后发一个全量刷新信号比监听每次增量简单可靠。</p></aside>
+</section>
+
+<section id="mental" class="mental"><h2>心智模型</h2><ul><li><strong>视线按环推进：每格记“来路上见过的最高地形”（maxHeightSeenToTile），下一格只跟一环内邻居中最低的那条垭口比——a≥b 不挡、c&gt;b 翻得过；视野多算一环，界外只留高个。</strong></li><li><strong>高度表：unitHeight 按层累加（平 0 丘 1 山 2），森林不加高度但 BlocksLineOfSightAtSameElevation 让 tileHeight=unitHeight+1——看得见（tileHeight）与打得着（unitHeight）是两个判定。</strong></li><li><strong>文明账本 viewableTiles 是四路拼集（领土邻格、单位视野、盟友领土、间谍），整表替换防并发；单位移动只有在新旧视野集合不等且不全在自家领土时才触发重算。</strong></li><li><strong>可见必已探索：viewableTiles 是文明持有的瞬时引用（@Transient 不进存档），exploredBy 是格子持有的持久名单（进存档）；新探索一格禁用 undo。</strong></li><li><strong>雾里显示旧照片：人类玩家读 lastSeenImprovement（坐标→改良名的记忆表），AI/观战读真值；拍照只发生在“看得见”期间，走出视野后敌人拆农场不影响你的画面。</strong></li><li><strong>画面两层组织：每格 TileGroup 十一层（地形在底城市按钮在顶），整图 TileGroupMap 按层归类成十二个全图层——点击走影子层命中格子；全图重刷靠各层“没变就早退”撑住性能。</strong></li></ul></section>
+
+<section id="practice"><h2>检索与推演</h2><p>先不看上面的代码，凭记忆回答。选错了，再回到对应段落弄清原因。选择题只是热身；不看正文讲清“一格能看多远、文明的账本怎么拼、一次移动后画面怎么变”，才说明这节课的主要内容已经理解了。</p><noscript><p>浏览器未启用 JavaScript，可以展开各题下面的答案自行核对。</p></noscript>
+<div class="quiz-grid">
+<form class="quiz" data-answer="b"><fieldset><legend>1. 视野 2 的平地单位，与它隔着一格丘陵的那格是山，能看见吗？</legend><label class="option"><input required type="radio" name="q1" value="a" data-feedback="丘陵确实挡视线，但判定是跟「垭口高度」比：目标山 c=2 大于路上最高 b=1，视线翻得过去，看得见。"><span>丘陵挡山看不见</span></label><label class="option"><input required type="radio" name="q1" value="b" data-feedback="a=0 低于 b=1，但 c=2 高于 b=1——「目标比垭口高就看得见」，这正是 canSeeMountainOverHill 钉住的行为。"><span>山比垭口高可见</span></label><label class="option"><input required type="radio" name="q1" value="c" data-feedback="这格距单位只有 2 格，在视野范围内；界外一环的过滤只管第 3 环，正常环内走高度判定。"><span>超出视野看不见</span></label><label class="option"><input required type="radio" name="q1" value="d" data-feedback="「看得见打不着」的是丘陵+森林隔丘陵——tileHeight 过、unitHeight 不过。纯山既可见也可打（canSeeAndAttackMountainOverHill）。"><span>看得见但打不着</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="c"><fieldset><legend>2. 文明账本 viewableTiles 里，下面哪一路来源不在其中？</legend><label class="option"><input required type="radio" name="q2" value="a" data-feedback="领土及邻格（ourTilesAndNeighboringTiles）是账本的打底，城市的格子永远可见。"><span>自家领土及邻格</span></label><label class="option"><input required type="radio" name="q2" value="b" data-feedback="每个单位都带上自己第 1 节算好的视野（滤掉自家领土格避免重复入账）。"><span>全部单位的视野</span></label><label class="option"><input required type="radio" name="q2" value="c" data-feedback="exploredBy 是格子上「谁探索过我」的持久名单，只记历史不记当前；账本拼的是当前可见，方向相反。"><span>全图格子的名单</span></label><label class="option"><input required type="radio" name="q2" value="d" data-feedback="驻扎间谍城市中心一环（getTilesVisibleViaSpies）并入账本；盟友城邦领土同样并入。"><span>间谍驻地及盟友</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="d"><fieldset><legend>3. 你的单位走远了，敌人拆掉你视野外那格的农场，你的画面显示什么？</legend><label class="option"><input required type="radio" name="q3" value="a" data-feedback="画面挂的确实是记忆值，但记忆不会自动抹掉——拍照只在看得见时发生，视野外的拆除根本不会写进记忆表。"><span>农场消失变空格</span></label><label class="option"><input required type="radio" name="q3" value="b" data-feedback="已探索的地形始终显示真实值（地形生成后不变），变灰的是颜色；只有改良和单位走记忆。"><span>地形退成未探索</span></label><label class="option"><input required type="radio" name="q3" value="c" data-feedback="黑格是「从未探索过」的待遇；这格你探索过，显示的是灰暗的旧照片——农场还在照片里。"><span>整格也变成黑格</span></label><label class="option"><input required type="radio" name="q3" value="d" data-feedback="getShownImprovement 对人类玩家返回 lastSeenImprovement，视野外的拆改不会更新相册——画面继续挂 Farm，直到单位走回视野重新拍照。"><span>旧照片里农场在</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+<form class="quiz" data-answer="a"><fieldset><legend>4. TileGroupMap 把几千个 TileGroup 重新按什么归堆？</legend><label class="option"><input required type="radio" name="q4" value="a" data-feedback="所有格子的同类子层（地形/道路/边界/…/城市按钮）收进同一个全图层，十二层按固定顺序摞——绘制顺序由层序+行序决定。"><span>按层类型装箱</span></label><label class="option"><input required type="radio" name="q4" value="b" data-feedback="按文明归属分堆没有意义：每个观众看的是同一批画面元素，三态靠每格 update 的分支处理，不靠分堆。"><span>按文明归属分</span></label><label class="option"><input required type="radio" name="q4" value="c" data-feedback="排序只在装箱入库时发生一次（按行号 x+y 分桶）；它不是归堆方式——真正按类型分的是十一个内容层加一个影子层。"><span>按格子行序分</span></label><label class="option"><input required type="radio" name="q4" value="d" data-feedback="可见性是每格 update 时查账本的结果，与分组无关；按可见性分堆反而要每次移动重新拆装。"><span>按可见性分堆</span></label></fieldset><button type="submit">核对答案</button><output class="feedback" aria-live="polite"></output></form>
+</div>
+<details class="rubric"><summary>选择题答案与核对位置</summary><p>1：山比垭口高可见；2：全图格子的名单；3：旧照片里农场在；4：按层类型装箱。分别对应 <a href="#sight">视线算法的垭口比较</a>、<a href="#civview">账本的四路来源</a>、<a href="#fog">lastSeenImprovement 记忆</a>、<a href="#screen">TileGroupMap 装箱</a>。</p></details>
+<h3>练习 A · 手推一张视野表（10 分钟）</h3><p>平地单位 O 视野 2。东向直线三格：(1,0) 森林（平地+Forest）、(2,0) 平地、(3,0) 丘陵。其余方向全平地。① 列出东向这一条线上每格是否可见，给出依据。② 全图可见共几格？③ 若把 (1,0) 的森林换成丘陵，(2,0) 和 (3,0) 的结论变吗？④ (3,0) 丘陵换成山呢？</p><details class="rubric"><summary>展开核对要点</summary><p>① (1,0) 森林可见（一环全部可见）。(2,0) 平地不可见：来路 b=1（森林的 tileHeight），a=0 与 c=0 都不满足判定。(3,0) 丘陵也不可见：它在 sight+1 环，界外过滤过了（1&gt;0），但 (2,0) 虽然不可见、仍然入账并传递了自己的高度——b=1，c=1 不能严格大于 b=1。要点：ViewableTile 无论可见与否都会把 maxHeightSeenToTile 传给下一环，被挡住的东西仍告诉后来者它多高。② 19 − 1（只有 (2,0) 被森林挡）= 18 格。REPL 实测一致：全平 19、(1,0) 放森林 18。③ 结论不变：丘陵的 tileHeight 也是 1，同样挡住 (2,0)（a<b、c<b），(3,0) 也仍然不能把 c=1 严格压过 b=1。④ (3,0) 换成山可见——c=2 &gt; b=1，而且它在 sight+1 环也过了过滤（2&gt;0）。总数 19 格 = 18 + 山。REPL 对应场景：cannotSeeHiddenElevation3Tiles（前 ③ 条）与 canSeeElevation3Tiles（山在界外环）正好给出这对对照。</p></details>
+<h3>练习 B · 追一次账本重算（8 分钟）</h3><p>开阔平地，你的勇士（视野 2）在自家城市旁 3 格处向远处探索，一步从 A 走到 B（相邻格）。① 单位的新旧 viewableTiles 各多少格？需要重算文明账本吗？依据是哪两个条件？② 这次移动让 exploredBy 名单增加几格？③ 若单位改在城市领土（含邻格）范围内从 A 走到 B，账本还会重算吗？④ 单位 destroy 时账本会重算吗——为什么？</p><details class="rubric"><summary>展开核对要点</summary><p>① 各 19 格（起点+6+12）；两集合各有 5 格不在对方中（平移一格的新月差），集合不等；且旧/新视野不全在 ourTilesAndNeighboringTiles 里（离城 3 格超出了邻格范围）——两个条件都满足，触发 civ.cache.updateViewableTiles。② 5 格——REPL 实测从 (0,0) 到 (1,0) exploredBy 由 19 涨到 24。③ 不会：shouldUpdateTiles 的第二个条件（⑤ 的领土闸门）拦下——领土及邻格本来就"永远可见"，账本不因这次移动而变。这解释了为什么守家单位来回走不卡。④ 会：MapUnit.destroy 里 removeFromTile 后紧接 civ.cache.updateViewableTiles()（L946）——单位没了，它的视野要从账本里消失，否则出现"幽灵视野"。</p></details>
+<h3>练习 C · 三态定位（5 分钟）</h3><p>玩家报告：“我的农场被敌人拆了，但地图上还画着农场；我派单位走过去一看，农场又突然消失了。”① 走过去之前，那格处于三态中的哪一态？画面上画的是真值还是记忆值？② “突然消失”发生在哪一步代码里？③ 同一场景里，敌人拆农场的那个瞬间，他自己的画面显示什么？</p><details class="rubric"><summary>展开核对要点</summary><p>① 已探索、不可见（fog 态）：exploredBy 有名、viewableTiles 无此格。改良层（layerImprovement → TileLayerImprovement.updateImprovementIcon）读 getShownImprovement，人类玩家返回 getLastSeenImprovement——记忆值 Farm。② 单位走近 → moveThroughTile → updateVisibleTiles → updateViewableTiles → updateLastSeenImprovements 把视野内每格的当前真值写进相册（此处是 null）→ 下一帧 updateTiles 全图重刷，改良层发现图标该摘了。一次"逻辑先改、画面后刷"的标准时序。③ 敌人（AI）读真值——AI 的 getShownImprovement 直接返回 tile.improvement，拆完立刻是空的；AI 也不维护 lastSeenImprovement（updateLastSeenImprovements 开头的 playerType == AI 早退）。人类对战时对方玩家与"你"同理：他在场就拍照，不在场挂旧照片。</p></details>
+<h3>练习 D · 本地核验（可选，10 分钟）</h3><p>在 Kotlin REPL 或测试里复现本课的数字：① 全平地视野 2 见 19 格；把第 3 环一格改丘陵，变 20 格；隔一格森林挡住二环平地，变 18 格。② 丘陵+森林的 unitHeight/tileHeight 各是多少？③ 单位平移一格后 exploredBy 涨几格？④ 在视野内给一格 setImprovement("Farm")，移出视野后拆掉，getShownImprovement 返回什么？</p><details class="rubric"><summary>展开核对要点</summary><p>本课程核对（Kotlin REPL，TestGame + makeHexagonalMap(5) + G&K 规则集手动载入，91 格）：① 19 / 20 / 18 全部复现（setTileTerrainAndFeatures 改地形后直接 getViewableTilesList(2)）；② unitHeight=1、tileHeight=2（Hill 的 VisibilityElevation +1，Forest 的 BlocksLineOfSightAtSameElevation 再 +1）；③ 19→24，涨 5 格；④ 返回 Farm——记忆表不因视野外的拆除而变。注意两点：REPL 里 TestGame 前需手动 Ruleset().apply{load(...)} 并放入 RulesetCache（load 返回 Unit，要用 apply 拿到 Ruleset 本身）；putInTile 会做 canMoveTo 检查，被占格会抛 IllegalStateException——用 removeFromTile 清干净再放。VisibilityTests 全 18 条重跑通过：`:tests:test --tests "com.unciv.logic.map.VisibilityTests"`。</p></details>
+</section>
+
+<section id="reading"><h2>原文与下一次复习</h2><p><strong>建议先读：</strong><a href="../../core/src/com/unciv/logic/map/TileMap.kt">TileMap.kt</a> 的 getViewableTiles（L490 起，注释里的 a/b/c 三高度场景分析值得逐字读）；再读 <a href="../../core/src/com/unciv/logic/civilization/transients/CivInfoTransientCache.kt">CivInfoTransientCache.kt</a> 的 updateViewableTiles 与 setNewViewableTiles（视野账本的全部入口）；然后是 <a href="../../core/src/com/unciv/logic/map/mapunit/MapUnit.kt">MapUnit.kt</a> 的 updateVisibleTiles（性能闸门的两个条件）；最后对照 <a href="../../tests/src/com/unciv/logic/map/VisibilityTests.kt">VisibilityTests.kt</a> 把 18 条高度组合用例走一遍，官方文档 <a href="../../docs/Developers/Map-rendering.md">Map-rendering.md</a> 作背景。速查见 <a href="reference/hexmath.html#sight">地图速查 · 视野与迷雾</a>。</p><p>下次学习前，用两分钟默写：垭口比较的规则（a≥b 或 c&gt;b）、高度表五行（平/森林/丘陵/丘林/山）、账本的四路来源与两个免算条件、三态分别查哪份数据、TileGroupMap 按什么装箱。约一周后重做练习 A 和 B。如果记不清“为什么看得见打不着”，回第 1 节看 ⑧⑨ 两个判定用的不同高度字段。</p><p>地图专题（05～12 课）到这里全部讲完。口述回顾的欠账仍然有效：第六～十一课的六条提示都在本课开头，挑任意一条用你自己的话讲一遍发给教学助手，就补上一份学习记录。有不清楚的分支，直接问教学助手；把你的手推视野表一起发来，就能更有针对性地讨论。</p><div class="nav-bottom"><a href="index.html">返回课程路线</a><a href="0011-movement-pathing.html">上一课：移动代价与寻路</a><a href="reference/hexmath.html">地图与坐标速查</a><a href="0013-tile-yields.html">下一课：一块地怎样变成产出</a></div></section>
+<footer>资料核对：2026-09-17。代码示例只保留本课相关部分，中文注释为讲解所加；改写过的示例会单独说明。REPL 实测（TestGame 半径 5 六边形图 91 格 + G&K 规则集）：平地视野 2 见 19 格、界外丘陵 20 格、森林挡二环 18 格；丘陵+森林 unitHeight 1 / tileHeight 2；平移一格 exploredBy 19→24；视野外拆农场 shown 仍 Farm。VisibilityTests 重跑 18 过 0 跳过 0 失败。</footer>
+</main></div>
+</body>
+</html>
